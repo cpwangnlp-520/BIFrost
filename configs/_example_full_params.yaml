@@ -1,5 +1,5 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# BIF Pipeline — Complete Parameter Reference
+# BIFrost Pipeline — Complete Parameter Reference
 # ═══════════════════════════════════════════════════════════════════════════════
 #
 # All keys are optional unless marked [required].  Default values are shown
@@ -7,34 +7,34 @@
 # are inherited by all steps that need them.
 #
 # Usage:
-#   bif pipeline run --config my_experiment.yaml
-#   bif pipeline run --config my_experiment.yaml --from run-bif --resume
-#   bif pipeline run --config my_experiment.yaml --new-run
-#   bif pipeline status --config my_experiment.yaml
+#   bifrost pipeline run --config my_experiment.yaml
+#   bifrost pipeline run --config my_experiment.yaml --from run-bif --resume
+#   bifrost pipeline run --config my_experiment.yaml --new-run
+#   bifrost pipeline status --config my_experiment.yaml
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ─── Global ────────────────────────────────────────────────────────────────────
 # [required] Output directory for all pipeline artifacts
-work_dir: /workspace/pku_percy/runs/70m_v4_example
+work_dir: /runs/my_experiment
 
 # SwanLab experiment name (default: "pipeline_<work_dir_basename>")
-experiment_name: 70m-v4-example
+experiment_name: my-experiment
 
 # SwanLab project name (default: "bif")
-project_name: bif
+project_name: bifrost
 
 # Global tokenizer — inherited by build-pool / prepare-finetune / train / run-bif
-tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+tokenizer_path: /models/pythia-70m
 
 # Global base model — inherited by train / schedule-compare
-base_model_path: /workspace/pku_percy/models/pythia-70m-step1000
+base_model_path: /models/pythia-70m
 
 # GPU visibility (set before any subprocess)
 cuda_visible_devices: "0,1,2,3,4,5,6,7"
 
 # Reuse shared data from a previous run (symlinks pool/, train/, bif_traces/, etc.)
 # When set, steps 1-6 are auto-completed; only schedule-compare/analyze run.
-# data_root: /workspace/pku_percy/runs/70m_v3_finemath_test
+# data_root: /runs/previous_experiment
 
 # ═══════════════════════════════════════════════════════════════════════════════
 steps:
@@ -50,14 +50,14 @@ steps:
   build-pool:
 
     # ── Mode A: symlink existing pool ──────────────────────────────────────
-    # pool_jsonl: /path/to/existing/pt_pool.jsonl
+    # pool_jsonl: /data/existing/pt_pool.jsonl
 
     # ── Mode B: custom data sources ────────────────────────────────────────
     # data_sources:
-    #   - path: /data/my_math.parquet       # parquet or jsonl
-    #     text_col: text                      # column with text (default: "text")
-    #     source_name: my_math                # label in output (default: filename)
-    #     n: 3000                             # max samples (optional)
+    #   - path: /data/my_math.parquet
+    #     text_col: text
+    #     source_name: my_math
+    #     n: 3000
 
     # ── Mode C: standard build-pool-v2 ─────────────────────────────────────
     # Available domains: fineweb_edu, c4, wikipedia, slimpajama, finemath,
@@ -90,18 +90,14 @@ steps:
       min_tokens: 512
       max_tokens: 1024
       calibrate_n: 100
-      # finetune_pool_jsonl: /path/to/existing/finetune_pool.jsonl
+      # finetune_pool_jsonl: /data/existing/finetune_pool.jsonl
 
   # ─── 2. prepare-finetune ─────────────────────────────────────────────────
   # Split finetune pool into train/query/val/test.
   # Auto-skips if all 4 splits already exist.
   # Input is auto-resolved from finetune_pool.jsonl unless input_path is set.
   prepare-finetune:
-    # input_path: /path/to/custom_input.jsonl   # override (default: finetune_pool)
-    # tokenizer_path: ...                       # (inherited from global)
-
-    # ── Split sizing: explicit counts OR ratios ────────────────────────────
-    # If *_n is set → absolute count; otherwise uses *_ratio.
+    # input_path: /data/custom_input.jsonl
     train_ratio: 0.7                       # default: 0.7
     query_ratio: 0.1                       # default: 0.1
     val_ratio: 0.1                         # default: 0.1
@@ -110,26 +106,18 @@ steps:
     # query_n: 128
     # val_n: 128
     # test_n: 128
-
-    # ── Filtering ──────────────────────────────────────────────────────────
     min_chars: 600                         # default: 100
     min_token_count: 512                   # default: 200
     max_token_count: 1024                  # default: 2000
     min_int_score: 3                       # default: 4
-    min_score: 0.0                         # default: 0.0
     min_language_score: 0.8                # default: 0.9
-    # require_english: true                 # flag, no value needed
-    # text_key: text                        # field name for text (default: "text")
+    # require_english: true
     seed: 42
 
   # ─── 3. train ────────────────────────────────────────────────────────────
   # Train base model on finetune train split, saving periodic checkpoints.
   # Auto-skips if final_model/ or checkpoint-1/ already exists.
   train:
-    # base_model_path: ...                  # (inherited from global)
-    # tokenizer_path: ...                   # (inherited from global)
-
-    # ── Training hyperparameters ───────────────────────────────────────────
     num_train_epochs: 1                    # default: 1.0
     learning_rate: 2e-4                    # default: 2e-5
     per_device_train_batch_size: 8         # default: 8
@@ -138,130 +126,74 @@ steps:
     max_length: 1024                       # default: 512
     weight_decay: 0.01                     # default: 0.01
     warmup_ratio: 0.03                     # default: 0.03
-    lr_scheduler_type: cosine              # default: "cosine"
-
-    # ── Checkpointing ──────────────────────────────────────────────────────
     target_num_checkpoints: 3              # default: 6
-    save_total_limit: 6                    # default: 6
-    # save_steps: 0                         # 0 = auto from target_num_checkpoints
-    # eval_steps: 0                         # 0 = auto from target_num_checkpoints
-    min_eval_steps: 20                     # default: 20
-    min_save_steps: 20                     # default: 20
-
-    # ── Logging ────────────────────────────────────────────────────────────
     logging_steps: 5                       # default: 10
-
-    # ── Precision / parallelism ────────────────────────────────────────────
+    eval_steps: 25
     bf16: true                             # default: false
-    fp16: false                            # default: false
     gradient_checkpointing: true           # default: false
-    # deepspeed: ds_config.json            # DeepSpeed config path (optional)
-    # fsdp: full_shard                     # FSDP mode (optional)
-    # fsdp_transformer_layer_cls_to_wrap: GPTNeoXLayer  # (optional)
-
-    # ── DDP / torchrun ────────────────────────────────────────────────────
     nproc_per_node: 2                      # default: 1
-    master_port: 29500                     # default: 29500
+    master_port: 29500
 
   # ─── 4. run-bif ──────────────────────────────────────────────────────────
   # SGLD sampling to collect BIF traces at each checkpoint.
-  # Uses pool_jsonl (PT pool) and query split from prepare-finetune.
   run-bif:
     max_length: 1024                       # default: 1024
-
-    # ── SGLD sampling ──────────────────────────────────────────────────────
     num_chains: 1                          # default: 4
     draws_per_chain: 100                   # default: 60
     burn_in: 5                             # default: 0
     thinning: 1                            # default: 1
-
-    # ── SGLD optimizer ─────────────────────────────────────────────────────
     lr: 1e-5                               # default: 5e-6
     gamma: 1e-4                            # default: 1e-3
     noise_scale: 2.0                       # default: 1.0
     # beta: 1.0                            # default: 1.0
-    # grad_clip: 1.0                       # default: None (no clipping)
-    # weight_decay: 0.0                    # default: 0.0
-
-    # ── Eval ───────────────────────────────────────────────────────────────
+    # grad_clip: 1.0                       # default: None
     train_batch_size: 32                   # default: 16
     eval_batch_size: 64                    # default: 32
-    pool_eval_subset: 0                    # 0 = evaluate full pool (default: 0)
-
-    # ── Precision / parallelism ────────────────────────────────────────────
-    dtype: bfloat16                        # float32 | float16 | bfloat16 (default: float32)
-    nproc_per_node: 1                      # default: 1
-    master_port: 29501                     # default: 29500
+    pool_eval_subset: 0                    # 0 = evaluate full pool
+    dtype: bfloat16                        # float32 | float16 | bfloat16
+    nproc_per_node: 1
+    master_port: 29501
 
   # ─── 5. analyze-bif ─────────────────────────────────────────────────────
   # Compute BIF scores from SGLD traces.
   analyze-bif:
     score_col: raw_cov_avg_over_queries    # default: "raw_cov_avg_over_queries"
-                                           # alternatives: "corr_mean_over_queries",
-                                           #   "corr_absmean_over_queries",
-                                           #   "traj_mean"
-    top_k: 200                             # default: 500
+    top_k: 500                             # default: 500
 
   # ─── 6. extract-top ─────────────────────────────────────────────────────
   # Extract top-K samples by BIF score from PT pool.
   extract-top:
-    top_k: 200                             # default: 500 (should match analyze-bif.top_k)
-    score_cols:                            # list of score columns to extract
-      - raw_cov_avg_over_queries           # default: ["raw_cov_avg_over_queries"]
-    # checkpoint: checkpoint-42            # pin a specific checkpoint (default: final_model or latest)
+    top_k: 500                             # should match analyze-bif.top_k
+    score_cols:
+      - raw_cov_avg_over_queries
+    # checkpoint: checkpoint-42            # pin a specific checkpoint
 
   # ─── 7. schedule-compare ────────────────────────────────────────────────
   # Train with replay at various mix ratios / schedules / modes.
   # Auto-inherits bf16, gradient_checkpointing, max_length, etc. from train.
   schedule-compare:
-    # base_model_path: ...                 # (inherited from global / train)
-    # tokenizer_path: ...                  # (inherited from global / train)
-
-    # ── Experiment grid ────────────────────────────────────────────────────
     schedules:
-      - sequential                         # replay first, then target (no shuffle)
-      - mixed                              # interleave replay + target (shuffle)
+      - sequential
+      - mixed
     replay_modes:
-      - selected                           # top-K BIF-scored samples
-      - random                             # random samples (ablation)
-      # - none                             # target-only baseline
-      # - top_random                       # top-K, randomly ordered
+      - selected
+      - random
     mix_ratios:
-      - 0.2                                # replay_ratio = replay_n / target_n
-      # - 0.5
-      # - 1.0
-    # score_types: [corr, raw]             # BIF score types (auto-inferred from score_cols)
-
-    # ── Training hyperparameters ───────────────────────────────────────────
-    num_train_epochs: 1                    # default: 1.0
-    learning_rate: 5e-5                    # default: 5e-5
-    per_device_train_batch_size: 8         # default: 2
-    per_device_eval_batch_size: 64         # default: 8
-    gradient_accumulation_steps: 1         # default: 2
-    max_length: 1024                       # (inherited from train if not set)
-    weight_decay: 0.01
-    warmup_ratio: 0.01                     # default: 0.01
-    lr_scheduler_type: cosine
-    logging_steps: 5                       # default: 10
-    # eval_steps: 0                        # 0 = auto
-
-    # ── Precision / parallelism ────────────────────────────────────────────
-    bf16: true                             # (inherited from train if not set)
-    gradient_checkpointing: true           # (inherited from train if not set)
-    # deepspeed: ...
-    # fsdp: ...
-    # fsdp_transformer_layer_cls_to_wrap: ...
-
-    # ── DDP / torchrun ────────────────────────────────────────────────────
-    nproc_per_node: 2                      # default: 1
-    master_port: 29502                     # default: 29500
-    seed: 42                               # default: 42
-
-    # ── Advanced ───────────────────────────────────────────────────────────
-    # val_jsonl: /path/to/val.jsonl        # override (default: finetune val split)
-    # top_k_jsonl: top_200_full.jsonl      # override (default: auto from extract-top.top_k)
+      - 0.2
+    num_train_epochs: 1
+    learning_rate: 2e-4
+    per_device_train_batch_size: 8
+    per_device_eval_batch_size: 64
+    gradient_accumulation_steps: 1
+    max_length: 1024
+    logging_steps: 5
+    eval_steps: 25
+    bf16: true
+    gradient_checkpointing: true
+    nproc_per_node: 2
+    master_port: 29502
+    seed: 42
 
   # ─── 8. schedule-analyze ────────────────────────────────────────────────
-  # Analyze schedule-compare results, produce summary CSV + SwanLab charts.
-  # No user-configurable parameters (auto-discovers data dirs).
+  # Analyze schedule-compare results. No user-configurable parameters.
   schedule-analyze: {}

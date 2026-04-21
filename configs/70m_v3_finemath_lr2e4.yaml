@@ -1,15 +1,31 @@
-tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
-base_model_path: /workspace/pku_percy/models/pythia-70m-step1000
+tokenizer_path: /models/pythia-70m-step1000
+base_model_path: /models/pythia-70m-step1000
 
-work_dir: /workspace/pku_percy/runs/70m_v3_finemath_lr2e4
+work_dir: /runs/70m_v3_finemath_lr2e4
 experiment_name: 70m-v3-finemath-lr2e4
 project_name: 70m-v3-finemath-lr2e4
-cuda_visible_devices: "6,7"
+cuda_visible_devices: "0,1"
 
 steps:
   build-pool:
-    pool_jsonl: /workspace/pku_percy/runs/70m_v3_finemath_test/pool/pt_pool.jsonl
-    finetune_pool_jsonl: /workspace/pku_percy/runs/70m_v3_finemath_test/finetune_pool/finetune_pool.jsonl
+    domains: finemath
+    total_tokens: 4M
+    min_int_score: 4
+    seed: 42
+    min_chars: 600
+    min_tokens: 512
+    max_tokens: 1024
+    calibrate_n: 100
+
+    finetune:
+      pool_type: target
+      total_tokens: 2M
+      domains: nemotron_math
+      min_int_score: 3
+      min_chars: 600
+      min_tokens: 512
+      max_tokens: 1024
+      calibrate_n: 100
 
   prepare-finetune:
     train_ratio: 0.7
