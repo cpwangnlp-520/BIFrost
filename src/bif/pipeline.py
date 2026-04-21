@@ -1158,60 +1158,65 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
     replay_modes = step_cfg.get("replay_modes", ["selected", "random"])
     schedules = step_cfg.get("schedules", ["mixed"])
     mix_ratios = step_cfg.get("mix_ratios", [0.1, 0.2, 0.3])
+    schedule_epochs = step_cfg.get("num_train_epochs", 1)
+    if isinstance(schedule_epochs, (int, float)):
+        schedule_epochs = [schedule_epochs]
 
     ensure_dir(str(paths.schedule_dir))
 
     if "none" in replay_modes:
         for schedule in schedules:
-            run_name = f"{schedule}_none"
-            run_dir = str(paths.schedule_dir / run_name)
-            if os.path.exists(os.path.join(run_dir, "run_summary.json")):
-                print(f"[pipeline] schedule-compare: skip {run_name} (done)")
-                continue
-            args = [
-                "schedule-compare",
-                "--output_dir",
-                run_dir,
-                "--run_name",
-                run_name,
-                "--schedule",
-                schedule,
-                "--replay_mode",
-                "none",
-                "--replay_ratio",
-                "0.0",
-                "--base_model_path",
-                base_model,
-                "--tokenizer_path",
-                tokenizer_path,
-                "--target_train_jsonl",
-                train_jsonl,
-                "--target_val_jsonl",
-                val_jsonl,
-                "--replay_pool_jsonl",
-                str(paths.pool_jsonl),
-                "--max_length",
-                str(step_cfg.get("max_length", 256)),
-                "--num_train_epochs",
-                str(step_cfg.get("num_train_epochs", 1.0)),
-                "--learning_rate",
-                str(step_cfg.get("learning_rate", 5e-5)),
-                "--per_device_train_batch_size",
-                str(step_cfg.get("per_device_train_batch_size", 2)),
-                "--per_device_eval_batch_size",
-                str(step_cfg.get("per_device_eval_batch_size", 8)),
-                "--gradient_accumulation_steps",
-                str(step_cfg.get("gradient_accumulation_steps", 2)),
-                "--logging_steps",
-                str(step_cfg.get("logging_steps", 10)),
-                "--eval_steps",
-                str(step_cfg.get("eval_steps", 0)),
-                "--seed",
-                str(step_cfg.get("seed", 42)),
-            ] + _ds_fsdp_args(step_cfg)
-            if experiment_name:
-                args += ["--experiment_name", experiment_name]
-            _run_bif_cmd(args)
+            for sc_ep in schedule_epochs:
+                ep_tag = f"_ep{sc_ep}" if len(schedule_epochs) > 1 else ""
+                run_name = f"{schedule}_none{ep_tag}"
+                run_dir = str(paths.schedule_dir / run_name)
+                if os.path.exists(os.path.join(run_dir, "run_summary.json")):
+                    print(f"[pipeline] schedule-compare: skip {run_name} (done)")
+                    continue
+                args = [
+                    "schedule-compare",
+                    "--output_dir",
+                    run_dir,
+                    "--run_name",
+                    run_name,
+                    "--schedule",
+                    schedule,
+                    "--replay_mode",
+                    "none",
+                    "--replay_ratio",
+                    "0.0",
+                    "--base_model_path",
+                    base_model,
+                    "--tokenizer_path",
+                    tokenizer_path,
+                    "--target_train_jsonl",
+                    train_jsonl,
+                    "--target_val_jsonl",
+                    val_jsonl,
+                    "--replay_pool_jsonl",
+                    str(paths.pool_jsonl),
+                    "--max_length",
+                    str(step_cfg.get("max_length", 256)),
+                    "--num_train_epochs",
+                    str(sc_ep),
+                    "--learning_rate",
+                    str(step_cfg.get("learning_rate", 5e-5)),
+                    "--per_device_train_batch_size",
+                    str(step_cfg.get("per_device_train_batch_size", 2)),
+                    "--per_device_eval_batch_size",
+                    str(step_cfg.get("per_device_eval_batch_size", 8)),
+                    "--gradient_accumulation_steps",
+                    str(step_cfg.get("gradient_accumulation_steps", 2)),
+                    "--logging_steps",
+                    str(step_cfg.get("logging_steps", 10)),
+                    "--eval_steps",
+                    str(step_cfg.get("eval_steps", 0)),
+                    "--seed",
+                    str(step_cfg.get("seed", 42)),
+                ] + _ds_fsdp_args(step_cfg)
+                if experiment_name:
+                    args += ["--experiment_name", experiment_name]
+                _run_bif_cmd(args)
 
     for st_idx, score_type in enumerate(score_types):
         if len(score_cols) == 1:
@@ -1242,7 +1247,7 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
                 )
                 continue
 
-        def _common_schedule_args() -> list[str]:
+        def _common_schedule_args(sc_ep: int | float) -> list[str]:
             args = [
                 "--base_model_path",
                 base_model,
@@ -1257,7 +1262,7 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
                 "--max_length",
                 str(step_cfg.get("max_length", 256)),
                 "--num_train_epochs",
-                str(step_cfg.get("num_train_epochs", 1.0)),
+                str(sc_ep),
                 "--learning_rate",
                 str(step_cfg.get("learning_rate", 5e-5)),
                 "--per_device_train_batch_size",
@@ -1279,10 +1284,12 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
 
         other_modes = [m for m in replay_modes if m != "none"]
         for ratio in mix_ratios:
-            ratio_str = str(ratio).replace(".", "")
-            group_label = f"{sc_prefix}ratio{ratio_str}"
+            for sc_ep in schedule_epochs:
+                ep_tag = f"_ep{sc_ep}" if len(schedule_epochs) > 1 else ""
+                ratio_str = str(ratio).replace(".", "")
+                group_label = f"{sc_prefix}ratio{ratio_str}{ep_tag}"
 
-            group_run_id_path = paths.schedule_dir / f".swanlab_{group_label}_run_id"
+                group_run_id_path = paths.schedule_dir / f".swanlab_{group_label}_run_id"
 
             run_id = None
             if group_run_id_path.exists():
@@ -1324,7 +1331,7 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
                         replay_mode,
                         "--replay_ratio",
                         str(ratio),
-                    ] + _common_schedule_args()
+                    ] + _common_schedule_args(sc_ep)
                     if run_id:
                         args += ["--swanlab_run_id", run_id]
                     args += ["--metric_prefix", metric_prefix]
