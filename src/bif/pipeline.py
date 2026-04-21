@@ -489,7 +489,67 @@ def _log_shared_data_stats(paths: _Paths) -> None:
     if paths.top_samples_dir.exists():
         for jsonl in sorted(paths.top_samples_dir.glob("top_*_full.jsonl")):
             _log_pool_data_stats(str(jsonl), "top_samples")
+            _log_topk_enrichment(str(jsonl), str(paths.pool_jsonl))
             break
+        for sub in sorted(paths.top_samples_dir.iterdir()):
+            if sub.is_dir():
+                for jsonl in sorted(sub.glob("top_*_full.jsonl")):
+                    _log_pool_data_stats(str(jsonl), f"top_samples_{sub.name}")
+                    _log_topk_enrichment(str(jsonl), str(paths.pool_jsonl), tag=sub.name)
+                    break
+
+
+def _log_topk_enrichment(
+    topk_jsonl: str, pool_jsonl: str, tag: str = ""
+) -> None:
+    """Log per-source enrichment: top-K fraction vs pool fraction."""
+    if not os.path.exists(topk_jsonl) or not os.path.exists(pool_jsonl):
+        return
+    topk_rows = read_jsonl(topk_jsonl)
+    pool_rows = read_jsonl(pool_jsonl)
+    if not topk_rows or not pool_rows:
+        return
+
+    def _source_frac(rows: list[dict[str, Any]]) -> dict[str, float]:
+        counts: dict[str, int] = {}
+        for r in rows:
+            s = str(r.get("source", r.get("subtype", "unknown")))
+            counts[s] = counts.get(s, 0) + 1
+        total = max(1, sum(counts.values()))
+        return {s: c / total for s, c in counts.items()}
+
+    topk_frac = _source_frac(topk_rows)
+    pool_frac = _source_frac(pool_rows)
+    all_sources = sorted(set(topk_frac) | set(pool_frac))
+
+    prefix = "4_3_extraction/enrichment"
+    if tag:
+        prefix = f"{prefix}/{tag}"
+
+    _swan_table(
+        f"{prefix}/source_enrichment",
+        headers=["source", "topk_frac", "pool_frac", "enrichment"],
+        rows=[
+            [
+                s,
+                f"{topk_frac.get(s, 0):.4f}",
+                f"{pool_frac.get(s, 0):.4f}",
+                f"{(topk_frac.get(s, 0) + 1e-9) / (pool_frac.get(s, 0) + 1e-9):.2f}x",
+            ]
+            for s in all_sources
+        ],
+    )
+
+    import numpy as _np
+
+    _swan_bar(
+        f"{prefix}/source_fraction_topk_vs_pool",
+        xaxis=all_sources,
+        series={
+            "top_k": [round(topk_frac.get(s, 0), 4) for s in all_sources],
+            "pool": [round(pool_frac.get(s, 0), 4) for s in all_sources],
+        },
+    )
 
 
 def _step_build_pool(cfg: dict[str, Any], paths: _Paths) -> None:

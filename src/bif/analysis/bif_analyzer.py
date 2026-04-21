@@ -546,6 +546,20 @@ def _process_one_checkpoint(
 
     rank = int(os.environ.get("RANK", "0"))
     if rank == 0:
+        topk_df = df.head(top_k)
+        if "source" in topk_df.columns:
+            topk_src_frac = topk_df["source"].fillna("unknown").value_counts(normalize=True)
+            pool_src_frac = df["source"].fillna("unknown").value_counts(normalize=True)
+            source_metrics = {}
+            for src in sorted(set(topk_src_frac.index) | set(pool_src_frac.index)):
+                safe_src = src.replace(" ", "_").replace("/", "_")[:30]
+                t_frac = float(topk_src_frac.get(src, 0))
+                p_frac = float(pool_src_frac.get(src, 0))
+                source_metrics[f"4_2_influence/source_frac/{safe_src}/topk"] = t_frac
+                source_metrics[f"4_2_influence/source_frac/{safe_src}/pool"] = p_frac
+                source_metrics[f"4_2_influence/source_frac/{safe_src}/enrichment"] = (t_frac + 1e-9) / (p_frac + 1e-9)
+            swan_log(source_metrics, step=ck_step)
+
         labels, counts = _score_histogram_bars(scores_arr, bins=40)
         log_bar(
             f"4_2_influence/scores/distribution/{ck_name}",
