@@ -261,8 +261,8 @@ def compute_bif_scores(
     cov_matrix = (pool_center.T @ query_center) / pool_center.shape[0]
     raw_cov_avg = cov_matrix.mean(axis=1)
 
-    pool_z = _safe_zscore_rows(pool_signal)
-    query_z = _safe_zscore_rows(query_signal)
+    pool_z = _safe_zscore_cols(pool_signal)
+    query_z = _safe_zscore_cols(query_signal)
     corr_matrix = (pool_z.T @ query_z) / pool_z.shape[0]
     corr_avg = corr_matrix.mean(axis=1)
     corr_absmean = np.abs(corr_matrix).mean(axis=1)
@@ -281,9 +281,9 @@ def compute_bif_scores(
     }
 
 
-def _safe_zscore_rows(mat: np.ndarray) -> np.ndarray:
-    mu = mat.mean(axis=1, keepdims=True)
-    sd = mat.std(axis=1, keepdims=True)
+def _safe_zscore_cols(mat: np.ndarray) -> np.ndarray:
+    mu = mat.mean(axis=0, keepdims=True)
+    sd = mat.std(axis=0, keepdims=True)
     sd = np.where(sd < 1e-12, 1.0, sd)
     return (mat - mu) / sd
 
