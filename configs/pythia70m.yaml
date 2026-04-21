@@ -1,0 +1,96 @@
+work_dir: /workspace/pku_percy/runs/pythia70m
+experiment_name: pythia-70m-cpt-replay-v4
+project_name: CPT-Replay-v4-70m
+
+steps:
+  build-pool:
+    pool_type: pt
+    total_tokens: 8M
+    seed: 42
+    min_chars: 200
+    min_tokens: 50
+    max_tokens: 1024
+    tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+    calibrate_n: 100
+
+    finetune:
+      pool_type: target
+      total_tokens: 4M
+      domains: nemotron_math
+      min_int_score: 3
+      min_chars: 200
+      min_tokens: 100
+      max_tokens: 1024
+      tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+      calibrate_n: 100
+
+  prepare-finetune:
+    tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+    train_ratio: 0.7
+    query_ratio: 0.1
+    val_ratio: 0.1
+    test_ratio: 0.1
+    seed: 42
+    min_chars: 100
+    min_token_count: 50
+    max_token_count: 1024
+    min_int_score: 3
+    min_language_score: 0.8
+
+  train:
+    base_model_path: /workspace/pku_percy/models/pythia-70m-step1000
+    tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+    num_train_epochs: 1.0
+    learning_rate: 5e-5
+    per_device_train_batch_size: 4
+    per_device_eval_batch_size: 64
+    gradient_accumulation_steps: 2
+    max_length: 512
+    target_num_checkpoints: 10
+    warmup_ratio: 0.03
+    bf16: true
+    gradient_checkpointing: false
+
+  run-bif:
+    num_chains: 4
+    draws_per_chain: 100
+    burn_in: 5
+    thinning: 2
+    train_batch_size: 64
+    eval_batch_size: 512
+    pool_eval_subset: 3000
+    nproc_per_node: 2
+    master_port: 29500
+    dtype: bfloat16
+
+  analyze-bif:
+    score_col: raw_cov_avg_over_queries
+    top_k: 500
+
+  extract-top:
+    top_k: 500
+    score_cols:
+      - raw_cov_avg_over_queries
+      - raw_cov_avg_over_queries
+
+  schedule-compare:
+    schedules:
+      - sequential
+      - mixed
+    replay_modes:
+      - selected
+      - random
+    mix_ratios:
+      - 0.1
+      - 0.2
+      - 0.3
+    num_train_epochs: 1.0
+    learning_rate: 5e-5
+    per_device_train_batch_size: 4
+    per_device_eval_batch_size: 64
+    gradient_accumulation_steps: 2
+    max_length: 512
+    logging_steps: 5
+    eval_steps: 50
+    bf16: true
+    seed: 42

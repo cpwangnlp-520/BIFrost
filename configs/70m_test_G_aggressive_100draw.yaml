@@ -1,0 +1,106 @@
+work_dir: /workspace/pku_percy/runs/70m_test_G_aggressive_100draw
+experiment_name: 70m-test-G-aggressive-100draw
+project_name: 70m-G-aggressive-100draw
+cuda_visible_devices: "0,1"
+
+steps:
+  build-pool:
+    pool_type: pt
+    total_tokens: 4M
+    seed: 42
+    min_chars: 600
+    min_tokens: 512
+    max_tokens: 1024
+    tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+    calibrate_n: 100
+
+    finetune:
+      pool_type: target
+      total_tokens: 2M
+      domains: nemotron_math
+      min_int_score: 3
+      min_chars: 600
+      min_tokens: 512
+      max_tokens: 1024
+      tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+      calibrate_n: 100
+
+  prepare-finetune:
+    tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+    train_ratio: 0.7
+    query_ratio: 0.1
+    val_ratio: 0.1
+    test_ratio: 0.1
+    seed: 42
+    min_chars: 600
+    min_token_count: 512
+    max_token_count: 1024
+    min_int_score: 3
+    min_language_score: 0.8
+
+  train:
+    base_model_path: /workspace/pku_percy/models/pythia-70m-step1000
+    tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+    num_train_epochs: 1
+    learning_rate: 2e-4
+    per_device_train_batch_size: 8
+    per_device_eval_batch_size: 64
+    gradient_accumulation_steps: 1
+    max_length: 1024
+    target_num_checkpoints: 3
+    warmup_ratio: 0.03
+    logging_steps: 5
+    eval_steps: 25
+    bf16: true
+    gradient_checkpointing: true
+    nproc_per_node: 2
+    master_port: 29570
+
+  run-bif:
+    max_length: 1024
+    num_chains: 1
+    draws_per_chain: 100
+    burn_in: 5
+    thinning: 1
+    lr: 5e-5
+    gamma: 1e-5
+    noise_scale: 5.0
+    train_batch_size: 32
+    eval_batch_size: 64
+    pool_eval_subset: 0
+    nproc_per_node: 1
+    master_port: 29571
+    dtype: bfloat16
+
+  analyze-bif:
+    score_col: raw_cov_avg_over_queries
+    top_k: 200
+
+  extract-top:
+    top_k: 200
+    score_cols:
+      - raw_cov_avg_over_queries
+      - raw_cov_avg_over_queries
+
+  schedule-compare:
+    schedules:
+      - sequential
+      - mixed
+    replay_modes:
+      - selected
+      - random
+    mix_ratios:
+      - 0.2
+    num_train_epochs: 1
+    learning_rate: 5e-5
+    per_device_train_batch_size: 8
+    per_device_eval_batch_size: 64
+    gradient_accumulation_steps: 1
+    max_length: 1024
+    logging_steps: 5
+    eval_steps: 25
+    bf16: true
+    gradient_checkpointing: true
+    nproc_per_node: 2
+    master_port: 29572
+    seed: 42
