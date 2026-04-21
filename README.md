@@ -2,8 +2,6 @@
 
 **BIFrost** is a data influence estimation toolkit for LLM fine-tuning. It uses Localized SGLD sampling to score training-pool examples by their influence on a held-out query set, then compares replay strategies (selected / random / none) via schedule experiments.
 
-> **BIFrost** = **BIF** + **Frost** (the rainbow bridge in Norse mythology connecting realms) — bridging pretraining data and finetuning objectives through influence estimation.
-
 ---
 
 ## Installation
