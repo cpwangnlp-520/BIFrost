@@ -133,10 +133,6 @@ BIFrost implements a 3-phase pipeline:
 
 3. **Replay Comparison** (`schedule-compare`): Train with the top-K most influential samples (selected) vs. random samples at various mix ratios and schedules (sequential or mixed), then compare eval losses.
 
-### Why `raw_cov_avg_over_queries`?
-
-The z-score-normalized correlation (`corr_mean_over_queries`) is structurally ≈ 0 because per-draw normalization cancels out the shared parameter-perturbation signal. `raw_cov_avg_over_queries` preserves the sign and magnitude of the influence signal.
-
 ---
 
 ## Individual Steps (CLI)
