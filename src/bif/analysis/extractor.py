@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 
 from bif.io import ensure_dir, read_jsonl, write_jsonl
+from bif.utils.naming import guess_model_tag, make_extract_name
 from bif.utils.tracker import finish as swan_finish
 from bif.utils.tracker import init_run, log_bar, log_heatmap, log_line, log_table
 
@@ -21,9 +22,9 @@ def _infer_score_col(df: pd.DataFrame, user_col: str | None = None) -> str:
         return user_col
     for c in [
         "traj_mean",
+        "corr_mean_over_queries",
         "corr_absmean_over_queries",
         "raw_cov_avg_over_queries",
-        "corr_absmean_over_queries",
         "emergence_last_minus_first",
     ]:
         if c in df.columns:
@@ -52,14 +53,22 @@ def extract_top_samples(
     top_n_per_source: int = 3,
     preview_chars: int = 2000,
     restrict_source_topn_to_topk: bool = False,
-    experiment_name: str = "bif_extraction",
+    ascending: bool = False,
+    experiment_name: str | None = None,
     run_name: str | None = None,
 ) -> dict[str, Any]:
-    """Extract top-influence samples and per-source representatives."""
+    """Extract top-influence samples and per-source representatives.
+    
+    Args:
+        ascending: If True, sort ascending (select bottom-K / most harmful).
+    """
     ensure_dir(out_dir)
 
+    auto_name = make_extract_name(
+        guess_model_tag(pool_jsonl), score_col or "score", top_k,
+    )
     init_run(
-        experiment_name=experiment_name,
+        experiment_name=experiment_name or auto_name,
         run_name=run_name,
         config={
             "pool_jsonl": pool_jsonl,
@@ -67,13 +76,14 @@ def extract_top_samples(
             "score_col": score_col,
             "top_k": top_k,
             "top_n_per_source": top_n_per_source,
+            "ascending": ascending,
         },
         tags=["extraction"],
     )
 
     ranking_df = pd.read_csv(ranking_csv)
     score_col = _infer_score_col(ranking_df, score_col)
-    ranking_df = ranking_df.sort_values(score_col, ascending=False).reset_index(
+    ranking_df = ranking_df.sort_values(score_col, ascending=ascending).reset_index(
         drop=True
     )
 
@@ -118,7 +128,7 @@ def extract_top_samples(
     )
 
     source_df = topk_df if restrict_source_topn_to_topk else merged
-    source_df = source_df.sort_values(score_col, ascending=False)
+    source_df = source_df.sort_values(score_col, ascending=ascending)
 
     per_source_rows = []
     for src, g in source_df.groupby(source_col, dropna=False, sort=True):
@@ -164,7 +174,7 @@ def extract_top_samples(
     for src, g in per_source_df.groupby(source_col, dropna=False, sort=True):
         md_lines.append(f"## Source: {src}")
         md_lines.append("")
-        for _, row in g.sort_values(score_col, ascending=False).iterrows():
+        for _, row in g.sort_values(score_col, ascending=ascending).iterrows():
             md_lines.append(f"- ID: `{row[id_col]}`")
             md_lines.append(f"  - Score: `{row[score_col]:.8f}`")
             if "url" in row and pd.notna(row.get("url")):
@@ -361,8 +371,8 @@ def main() -> None:
     parser.add_argument("--restrict_source_topn_to_topk", action="store_true")
     parser.add_argument(
         "--experiment_name",
-        default="bif_extraction",
-        help="SwanLab experiment name for this extraction run.",
+        default=None,
+        help="SwanLab experiment name. Auto-generated from params if not set.",
     )
     parser.add_argument(
         "--run_name",

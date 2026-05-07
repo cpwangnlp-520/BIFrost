@@ -27,6 +27,7 @@ from bif.training.callbacks import (
     infer_interval,
     log_eval_step0,
 )
+from bif.utils.naming import fmt_lr, guess_model_tag, make_train_name
 from bif.utils.tracker import finish, init_run
 
 
@@ -60,7 +61,7 @@ def train_with_checkpoints(
     deepspeed: str | None = None,
     fsdp: str = "",
     fsdp_transformer_layer_cls_to_wrap: str | None = None,
-    experiment_name: str = "stage2_train",
+    experiment_name: str | None = None,
     run_name: str | None = None,
     manage_tracking: bool = True,
 ) -> dict[str, Any]:
@@ -117,8 +118,14 @@ def train_with_checkpoints(
     history_cb = _LossLogCallback()
     callbacks: list = [history_cb, _GradNormCallback()]
     if local_rank == 0 and manage_tracking:
+        auto_name = make_train_name(
+            guess_model_tag(base_model_path),
+            learning_rate,
+            per_device_train_batch_size,
+            num_train_epochs,
+        )
         init_run(
-            experiment_name=experiment_name,
+            experiment_name=experiment_name or auto_name,
             run_name=run_name,
             config={
                 "base_model": base_model_path,
@@ -258,7 +265,7 @@ def main() -> None:
     parser.add_argument("--deepspeed", default=None)
     parser.add_argument("--fsdp", default="")
     parser.add_argument("--fsdp_transformer_layer_cls_to_wrap", default=None)
-    parser.add_argument("--experiment_name", default="stage2_train")
+    parser.add_argument("--experiment_name", default=None)
     parser.add_argument("--run_name", default=None)
     args = parser.parse_args()
 

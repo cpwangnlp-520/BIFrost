@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from bif.io import ensure_dir, read_json
+from bif.utils.naming import guess_model_tag, make_schedule_analysis_name
 from bif.utils.tracker import finish as swan_finish
 from bif.utils.tracker import init_run, log_bar, log_heatmap, log_table
 from bif.utils.tracker import log as swan_log
@@ -327,8 +328,9 @@ def analyze_schedule_compare(
     in_pipeline = bool(os.environ.get("SWANLAB_PIPELINE_RUN_ID"))
 
     if not in_pipeline:
+        auto_name = make_schedule_analysis_name(guess_model_tag(runs_root))
         init_run(
-            experiment_name="schedule_analysis",
+            experiment_name=auto_name,
             config={"runs_root": runs_root},
             tags=["schedule_compare", "analysis"],
         )

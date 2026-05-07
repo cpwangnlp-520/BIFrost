@@ -1,12 +1,8 @@
 """SwanLab experiment tracking integration.
 
 Two integration paths:
-  1. Manual: init_run() + log() + finish() — used by BIF runner, analysis, pipeline
-  2. HF Trainer: create_hf_callback() — used by checkpoint_trainer, schedule_trainer
-
-Pipeline mode: when SWANLAB_PIPELINE_RUN_ID env var is set, all steps share
-ONE SwanLab run via ``id=<run_id>`` + ``resume='allow'``.  The pipeline
-runner calls finish_pipeline() at the very end to close the run.
+  1. Manual: init_run() + log() + finish() — used by all modules
+  2. Pipeline: shared SwanLab run via env vars (SWANLAB_PIPELINE_RUN_ID)
 """
 
 from __future__ import annotations
@@ -24,7 +20,7 @@ _ENV_RUN_ID = "SWANLAB_PIPELINE_RUN_ID"
 _ENV_EXPERIMENT = "SWANLAB_PIPELINE_EXPERIMENT"
 _ENV_PROJECT = "SWANLAB_PROJECT"
 
-_DEFAULT_PROJECT = "bif"
+_DEFAULT_PROJECT = "BIFrost"
 
 
 def get_project() -> str:
@@ -57,6 +53,7 @@ def init_run(
     tags: list[str] | None = None,
     description: str = "",
     run_name: str | None = None,
+    project: str | None = None,
 ) -> None:
     """Initialize a SwanLab run (call only from rank 0)."""
     global _pending_logs
@@ -65,24 +62,23 @@ def init_run(
     pipeline_run_id = os.environ.get(_ENV_RUN_ID)
     pipeline_experiment = os.environ.get(_ENV_EXPERIMENT)
 
-    _proj = get_project()
-    if pipeline_run_id and pipeline_experiment and run_name is None:
+    _proj = project if project is not None else get_project()
+    if pipeline_run_id and pipeline_experiment:
+        display_name = run_name if run_name is not None else experiment_name
         init_kwargs: dict[str, Any] = {
             "project": _proj,
-            "experiment_name": pipeline_experiment,
-            "id": pipeline_run_id,
-            "resume": "allow",
+            "experiment_name": display_name,
+            "group": pipeline_experiment,
             "description": description,
             "config": config,
             "tags": tags,
         }
     else:
-        display_name = run_name if run_name is not None else experiment_name
         init_kwargs = {
             "project": _proj,
-            "experiment_name": display_name,
-            "group": experiment_name,
-            "description": description,
+            "experiment_name": experiment_name,
+            "group": run_name if run_name is not None else None,
+            "description": f"run_name={run_name}" if run_name else description,
             "config": config,
             "tags": tags,
         }
@@ -94,45 +90,6 @@ def init_run(
             break
         time.sleep(0.5)
 
-
-def create_hf_callback(
-    experiment_name: str | None = None,
-    run_name: str | None = None,
-    config: dict[str, Any] | None = None,
-    tags: list[str] | None = None,
-    description: str = "",
-) -> Any:
-    """Create a SwanLabCallback for HF Trainer.
-
-    In pipeline mode, the pipeline runner has already called init_run()
-    BEFORE spawning the training subprocess, so SwanLab is already
-    initialised.  We pass mode="disabled" to prevent SwanLabCallback
-    from calling swanlab.init() again — all logging goes through the
-    existing run via our manual log() calls in _GradNormCallback and
-    ReplayTrainer.log().
-
-    In standalone mode, we let SwanLabCallback manage the full lifecycle
-    (init on train_begin, finish on train_end).
-    """
-    from swanlab.integration.transformers import SwanLabCallback
-
-    pipeline_run_id = os.environ.get(_ENV_RUN_ID)
-    pipeline_experiment = os.environ.get(_ENV_EXPERIMENT)
-
-    if pipeline_run_id and pipeline_experiment and _is_initialised():
-        return SwanLabCallback(mode="disabled")
-    else:
-        display_name = run_name or experiment_name or "train"
-        init_kwargs: dict[str, Any] = {
-            "project": get_project(),
-            "experiment_name": display_name,
-            "description": description,
-        }
-        if config:
-            init_kwargs["config"] = config
-        if tags:
-            init_kwargs["tags"] = tags
-        return SwanLabCallback(**init_kwargs)
 
 
 def log(data: dict[str, Any], step: int | None = None) -> None:
@@ -148,16 +105,10 @@ def log(data: dict[str, Any], step: int | None = None) -> None:
 
 
 def finish() -> None:
-    """Close the SwanLab run.
-
-    In pipeline mode, skip finish() so the next step can resume.
-    Call finish_pipeline() instead at the very end of the pipeline.
-    """
+    """Close the SwanLab run."""
     if not _is_initialised():
         return
     _flush_pending()
-    if os.environ.get(_ENV_RUN_ID):
-        return
     try:
         swanlab.finish()
     except Exception:
@@ -231,6 +182,7 @@ def log_heatmap(
     matrix: "np.ndarray",  # noqa: F821  shape (len(yaxis), len(xaxis))
     value_label: str = "value",
     precision: int = 4,
+    show_labels: bool = False,
 ) -> None:
     """Log a 2-D matrix as a native SwanLab echarts HeatMap.
 
@@ -241,11 +193,13 @@ def log_heatmap(
         matrix:      2-D array of shape (len(yaxis), len(xaxis)).
         value_label: Series name displayed in the tooltip.
         precision:   Decimal places to round values to.
+        show_labels: If True, show numeric labels on cells (default False for readability).
     """
     if not _is_initialised():
         return
     try:
-        # echarts HeatMap expects value as list of [x_idx, y_idx, val]
+        from pyecharts.options.series_options import LabelOpts
+
         value = [
             [j, i, round(float(matrix[i, j]), precision)]
             for i in range(len(yaxis))
@@ -253,7 +207,17 @@ def log_heatmap(
         ]
         chart = swanlab.echarts.HeatMap()
         chart.add_xaxis(xaxis)
-        chart.add_yaxis(value_label, yaxis, value)
+        chart.add_yaxis(
+            value_label,
+            yaxis,
+            value,
+            label_opts=LabelOpts(is_show=show_labels),
+        )
+        chart.set_global_opts(
+            visual_map_opts={"min": round(float(matrix.min()), precision),
+                             "max": round(float(matrix.max()), precision),
+                             "calculable": True},
+        )
         swanlab.log({key: chart})
     except Exception:
         pass
@@ -338,6 +302,90 @@ def log_line(
                 ),
             ),
         )
+        swanlab.log({key: chart})
+    except Exception:
+        pass
+
+
+def log_scatter(
+    key: str,
+    xaxis_name: str,
+    yaxis_name: str,
+    series: dict[str, list[tuple[float, float]]],
+) -> None:
+    """Log a scatter plot as a native SwanLab echarts Scatter.
+
+    Args:
+        key:        Metric name shown in SwanLab.
+        xaxis_name: Label for the x-axis.
+        yaxis_name: Label for the y-axis.
+        series:     Dict mapping series name → list of (x, y) tuples.
+    """
+    if not _is_initialised():
+        return
+    try:
+        chart = swanlab.echarts.Scatter()
+        chart.add_xaxis([])
+        for name, points in series.items():
+            data = [[round(float(x), 6), round(float(y), 6)] for x, y in points]
+            chart.add_yaxis(name, data, symbol_size=5)
+        chart.set_global_opts(
+            xaxis_opts={"type": "value", "name": xaxis_name},
+            yaxis_opts={"type": "value", "name": yaxis_name},
+        )
+        swanlab.log({key: chart})
+    except Exception:
+        pass
+
+
+def log_pie(
+    key: str,
+    series_name: str,
+    data: list[tuple[str, float]],
+) -> None:
+    """Log a pie chart as a native SwanLab echarts Pie.
+
+    Args:
+        key:         Metric name shown in SwanLab.
+        series_name: Series name displayed in the tooltip.
+        data:        List of (label, value) tuples.
+    """
+    if not _is_initialised():
+        return
+    try:
+        chart = swanlab.echarts.Pie()
+        chart.add(
+            series_name,
+            data,
+            radius=["30%", "70%"],
+        )
+        swanlab.log({key: chart})
+    except Exception:
+        pass
+
+
+def log_boxplot(
+    key: str,
+    xaxis: list[str],
+    series: dict[str, list[list[float]]],
+) -> None:
+    """Log a boxplot as a native SwanLab echarts Boxplot.
+
+    Each series maps a name to a list of 5-number summaries
+    [min, Q1, median, Q3, max] per category.
+
+    Args:
+        key:    Metric name shown in SwanLab.
+        xaxis:  Category labels for the x-axis.
+        series: Dict mapping series name → list of [min, Q1, med, Q3, max].
+    """
+    if not _is_initialised():
+        return
+    try:
+        chart = swanlab.echarts.Boxplot()
+        chart.add_xaxis(xaxis)
+        for name, boxes in series.items():
+            chart.add_yaxis(name, boxes)
         swanlab.log({key: chart})
     except Exception:
         pass

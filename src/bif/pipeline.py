@@ -47,7 +47,7 @@ Config JSON format (example):
             "dtype": "bfloat16"
         },
         "analyze-bif": {
-            "score_col": "raw_cov_avg_over_queries",
+            "score_col": "corr_mean_over_queries",
             "top_k": 500
         },
         "extract-top": {
@@ -74,6 +74,16 @@ from pathlib import Path
 from typing import Any
 
 from bif.io import ensure_dir, read_jsonl
+from bif.utils.naming import (
+    guess_model_tag as _guess_model_tag,
+    make_train_name as _make_train_name,
+    make_analyze_name as _make_analyze_name,
+    make_extract_name as _make_extract_name,
+    make_replay_name as _make_replay_name,
+    make_schedule_analysis_name as _make_sched_analysis_name,
+    resolve_model_tag as _resolve_model_tag,
+    fmt_lr as _fmt_lr,
+)
 from bif.utils.tracker import finish_pipeline as _swan_finish_pipeline
 from bif.utils.tracker import init_run as _swan_init
 from bif.utils.tracker import log as _swan_log
@@ -116,6 +126,7 @@ STEPS: list[str] = [
     "run-bif",
     "analyze-bif",
     "extract-top",
+    "filter-training",
     "schedule-compare",
     "schedule-analyze",
 ]
@@ -301,7 +312,10 @@ def _run_bif_cmd(
     else:
         cmd = [sys.executable, "-m", "bif.cli"] + args
     print(f"\n[pipeline] Running: {' '.join(cmd)}\n")
-    result = subprocess.run(cmd, check=False, env=os.environ.copy())
+    env = os.environ.copy()
+    if nproc_per_node <= 1:
+        env["CUDA_VISIBLE_DEVICES"] = "0"
+    result = subprocess.run(cmd, check=False, env=env)
     if result.returncode != 0:
         raise RuntimeError(
             f"Step failed with exit code {result.returncode}: {' '.join(args)}"
@@ -674,6 +688,8 @@ def _step_build_pool(cfg: dict[str, Any], paths: _Paths) -> None:
     if finetune_pool and os.path.exists(finetune_pool):
         _log_pool_data_stats(finetune_pool, "finetune_pool")
 
+    return True
+
 
 def _build_finetune_pool(ft_cfg: dict[str, Any], paths: _Paths) -> None:
     """Build the finetune pool using build-pool (called from _step_build_pool).
@@ -802,6 +818,7 @@ def _step_prepare_finetune(cfg: dict[str, Any], paths: _Paths) -> None:
     if step_cfg.get("require_english"):
         args += ["--require_english"]
     _run_bif_cmd(args)
+    return True
 
 
 def _relog_schedule_metrics(schedule_analysis_dir: str, schedule_compare_dir: str) -> None:
@@ -833,6 +850,11 @@ def _step_train(cfg: dict[str, Any], paths: _Paths, experiment_name: str) -> Non
     val_jsonl = str(paths.finetune_jsonl("val"))
     base_model = step_cfg.get("base_model_path", _global_base_model(cfg) or "")
     tokenizer = step_cfg.get("tokenizer_path", _global_tokenizer(cfg) or base_model)
+    model_tag = _resolve_model_tag(step_cfg.get("model_tag"), base_model)
+    lr = float(step_cfg.get("learning_rate", 2e-5))
+    bs = int(step_cfg.get("per_device_train_batch_size", 8))
+    ep = float(step_cfg.get("num_train_epochs", 1.0))
+    auto_train_name = _make_train_name(model_tag, lr, bs, ep)
     args = [
         "train",
         "--base_model_path",
@@ -846,13 +868,13 @@ def _step_train(cfg: dict[str, Any], paths: _Paths, experiment_name: str) -> Non
         "--output_dir",
         str(paths.train_dir),
         "--num_train_epochs",
-        str(step_cfg.get("num_train_epochs", 1.0)),
+        str(ep),
         "--learning_rate",
-        str(step_cfg.get("learning_rate", 2e-5)),
+        str(lr),
         "--target_num_checkpoints",
         str(step_cfg.get("target_num_checkpoints", 6)),
         "--per_device_train_batch_size",
-        str(step_cfg.get("per_device_train_batch_size", 8)),
+        str(bs),
         "--per_device_eval_batch_size",
         str(step_cfg.get("per_device_eval_batch_size", 8)),
         "--gradient_accumulation_steps",
@@ -872,72 +894,98 @@ def _step_train(cfg: dict[str, Any], paths: _Paths, experiment_name: str) -> Non
         "--experiment_name",
         experiment_name,
         "--run_name",
-        "basemodel",
+        auto_train_name,
     ]
     args += _ds_fsdp_args(step_cfg)
     nproc = int(step_cfg.get("nproc_per_node", 1))
     master_port = int(step_cfg.get("master_port", 29500))
     _run_bif_cmd(args, nproc_per_node=nproc, master_port=master_port)
+    return True
 
 
 def _step_run_bif(
     cfg: dict[str, Any], paths: _Paths, resume: bool, experiment_name: str
 ) -> None:
     step_cfg = cfg.get("steps", {}).get("run-bif", {})
-    query_jsonl = str(paths.finetune_jsonl("query"))
+    query_jsonl = step_cfg.get("query_jsonl", str(paths.finetune_jsonl("query")))
+    pool_jsonl = step_cfg.get("pool_jsonl", str(paths.pool_jsonl))
+    if pool_jsonl == "finetune_train":
+        pool_jsonl = str(paths.finetune_jsonl("train"))
+    elif pool_jsonl == "finetune_pool":
+        pool_jsonl = str(paths.finetune_pool_jsonl)
     nproc = int(step_cfg.get("nproc_per_node", 1))
     master_port = int(step_cfg.get("master_port", 29500))
-    args = [
-        "run-bif",
+    num_chains = int(step_cfg.get("num_chains", 4))
+    chain_parallel = bool(step_cfg.get("chain_parallel", False))
+
+    common_args = [
         "--model_root",
         str(paths.train_dir),
         "--run_all_checkpoints",
         "--pool_jsonl",
-        str(paths.pool_jsonl),
+        pool_jsonl,
         "--query_jsonl",
         query_jsonl,
         "--out_dir",
         str(paths.bif_traces_dir),
-        "--num_chains",
-        str(step_cfg.get("num_chains", 4)),
         "--draws_per_chain",
         str(step_cfg.get("draws_per_chain", 60)),
-        "--burn_in",
-        str(step_cfg.get("burn_in", 0)),
-        "--thinning",
-        str(step_cfg.get("thinning", 1)),
+        "--num_burnin_steps",
+        str(step_cfg.get("num_burnin_steps", step_cfg.get("burn_in", 0))),
+        "--num_steps_bw_draws",
+        str(step_cfg.get("num_steps_bw_draws", step_cfg.get("thinning", 1))),
         "--train_batch_size",
         str(step_cfg.get("train_batch_size", 16)),
         "--eval_batch_size",
         str(step_cfg.get("eval_batch_size", 32)),
         "--pool_eval_subset",
         str(step_cfg.get("pool_eval_subset", 0)),
+        "--batches_per_draw",
+        str(step_cfg.get("batches_per_draw", 0)),
+        "--gradient_accumulation_steps",
+        str(step_cfg.get("gradient_accumulation_steps", 1)),
         "--max_length",
         str(step_cfg.get("max_length", 1024)),
         "--lr",
         str(step_cfg.get("lr", 5e-6)),
         "--gamma",
         str(step_cfg.get("gamma", 1e-3)),
-        "--noise_scale",
-        str(step_cfg.get("noise_scale", 1.0)),
+        "--noise_level",
+        str(step_cfg.get("noise_level", step_cfg.get("noise_scale", 1.0))),
         "--dtype",
         step_cfg.get("dtype", "float32"),
         "--experiment_name",
-        experiment_name,  # shared across all pipeline steps
-        "--run_name",
-        "bif",
+        experiment_name,
     ]
+    model_tag = _resolve_model_tag(step_cfg.get("model_tag"), _global_base_model(cfg) or "")
+    lr = float(step_cfg.get("lr", 5e-6))
+    gamma = float(step_cfg.get("gamma", 1e-3))
+    draws = int(step_cfg.get("draws_per_chain", 60))
+    burn_in = int(step_cfg.get("num_burnin_steps", step_cfg.get("burn_in", 0)))
+    auto_bif_name = f"{model_tag}-bif-pipe-lr{_fmt_lr(lr)}-g{gamma}-d{draws}-b{burn_in}"
+    common_args += ["--run_name", auto_bif_name]
+    common_args += ["--model_tag", model_tag]
     if step_cfg.get("beta") is not None:
-        args += ["--beta", str(step_cfg["beta"])]
+        common_args += ["--beta", str(step_cfg["beta"])]
+    if step_cfg.get("nbeta_mode") is not None:
+        common_args += ["--nbeta_mode", str(step_cfg["nbeta_mode"])]
+    if step_cfg.get("nbeta") is not None and float(step_cfg["nbeta"]) > 0:
+        common_args += ["--nbeta", str(step_cfg["nbeta"])]
     if step_cfg.get("grad_clip") is not None:
-        args += ["--grad_clip", str(step_cfg["grad_clip"])]
+        common_args += ["--grad_clip", str(step_cfg["grad_clip"])]
     if step_cfg.get("weight_decay") is not None:
-        args += ["--weight_decay", str(step_cfg["weight_decay"])]
+        common_args += ["--weight_decay", str(step_cfg["weight_decay"])]
+    if step_cfg.get("sampler_type") is not None:
+        common_args += ["--sampler_type", str(step_cfg["sampler_type"])]
+    if step_cfg.get("rmsprop_alpha") is not None:
+        common_args += ["--rmsprop_alpha", str(step_cfg["rmsprop_alpha"])]
+    if step_cfg.get("rmsprop_eps") is not None:
+        common_args += ["--rmsprop_eps", str(step_cfg["rmsprop_eps"])]
+    if step_cfg.get("checkpoints"):
+        common_args += ["--checkpoints", ",".join(step_cfg["checkpoints"])]
     if resume:
-        args.append("--resume")
+        common_args.append("--resume")
     else:
-        # Warn if partial traces already exist: without --resume they will be
-        # overwritten.  Users restarting mid-step should pass --resume.
         existing = list(paths.bif_traces_dir.glob("*/chain_*/pool_loss_trace.jsonl"))
         if existing:
             print(
@@ -945,11 +993,52 @@ def _step_run_bif(
                 f"{paths.bif_traces_dir} but --resume was not set. "
                 "Pass --resume to skip already-finished checkpoints."
             )
-    _run_bif_cmd(args, nproc_per_node=nproc, master_port=master_port)
+
+    if chain_parallel and num_chains > 1:
+        n_gpus = int(os.environ.get("BIF_CHAIN_PARALLEL_GPUS", "8"))
+        procs: list[subprocess.Popen] = []
+        for chain_id in range(num_chains):
+            gpu = chain_id % n_gpus
+            chain_env = os.environ.copy()
+            chain_env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+            args = [
+                "run-bif",
+                "--num_chains", "1",
+                "--chain_id", str(chain_id),
+            ] + common_args
+            cmd = [sys.executable, "-m", "bif.cli"] + args
+            print(f"\n[pipeline] chain-parallel: launching chain {chain_id} on GPU {gpu}")
+            procs.append(subprocess.Popen(cmd, env=chain_env))
+        failed = []
+        for i, proc in enumerate(procs):
+            rc = proc.wait()
+            if rc != 0:
+                failed.append((i, rc))
+                print(f"[pipeline] chain-parallel: chain {i} FAILED with exit code {rc}")
+            else:
+                print(f"[pipeline] chain-parallel: chain {i} done")
+        if failed:
+            raise RuntimeError(
+                f"chain-parallel: {len(failed)}/{num_chains} chains failed: {failed}"
+            )
+        print(f"[pipeline] chain-parallel: all {num_chains} chains completed")
+    else:
+        args = [
+            "run-bif",
+            "--num_chains",
+            str(num_chains),
+        ] + common_args
+        _run_bif_cmd(args, nproc_per_node=nproc, master_port=master_port)
+    return True
 
 
 def _step_analyze_bif(cfg: dict[str, Any], paths: _Paths, experiment_name: str) -> None:
     step_cfg = cfg.get("steps", {}).get("analyze-bif", {})
+    negate_scores = step_cfg.get("negate_scores", False)
+    score_col = step_cfg.get("score_col", "bif_mean")
+    top_k = int(step_cfg.get("top_k", 500))
+    model_tag = _resolve_model_tag(cfg.get("model_tag"), _global_base_model(cfg) or "")
+    auto_analyze_name = _make_analyze_name(model_tag, score_col, top_k)
     args = [
         "analyze-bif",
         "--bif_root",
@@ -957,15 +1046,18 @@ def _step_analyze_bif(cfg: dict[str, Any], paths: _Paths, experiment_name: str) 
         "--out_dir",
         str(paths.bif_analysis_dir),
         "--score_col",
-        step_cfg.get("score_col", "raw_cov_avg_over_queries"),
+        score_col,
         "--top_k",
-        str(step_cfg.get("top_k", 500)),
+        str(top_k),
         "--experiment_name",
-        experiment_name,  # shared across all pipeline steps
+        experiment_name,
         "--run_name",
-        "analysis",
+        auto_analyze_name,
     ]
+    if not negate_scores:
+        args.append("--no-negate_scores")
     _run_bif_cmd(args)
+    return True
 
 
 def _resolve_ranking_csv(
@@ -1008,24 +1100,31 @@ def _resolve_ranking_csv(
 def _step_extract_top(cfg: dict[str, Any], paths: _Paths, experiment_name: str) -> None:
     step_cfg = cfg.get("steps", {}).get("extract-top", {})
     top_k = step_cfg.get("top_k", 500)
+    ascending = step_cfg.get("ascending", False)
+    pool_jsonl_override = step_cfg.get("pool_jsonl")
     ranking_csv = _resolve_ranking_csv(step_cfg, paths.bif_analysis_dir)
     score_cols = step_cfg.get("score_cols", ["raw_cov_avg_over_queries"])
     if isinstance(score_cols, str):
         score_cols = [score_cols]
+    model_tag = _resolve_model_tag(cfg.get("model_tag"), _global_base_model(cfg) or "")
 
     for sc in score_cols:
-        sc_tag = "corr" if "corr" in sc else "raw"
+        auto_extract_name = _make_extract_name(model_tag, sc, top_k)
+        sc_tag = "corr" if "corr" in sc else ("loss" if "loss" in sc else "raw")
         if len(score_cols) == 1:
             out_dir = str(paths.top_samples_dir)
-            run_name = f"extraction_{sc_tag}"
         else:
             out_dir = str(paths.top_samples_dir / sc_tag)
-            run_name = f"extraction_{sc_tag}"
 
+        pool_path = pool_jsonl_override or str(paths.pool_jsonl)
+        if pool_path == "finetune_train":
+            pool_path = str(paths.finetune_jsonl("train"))
+        elif pool_path == "finetune_pool":
+            pool_path = str(paths.finetune_pool_jsonl)
         args = [
             "extract-top",
             "--pool_jsonl",
-            str(paths.pool_jsonl),
+            pool_path,
             "--ranking_csv",
             ranking_csv,
             "--out_dir",
@@ -1037,10 +1136,75 @@ def _step_extract_top(cfg: dict[str, Any], paths: _Paths, experiment_name: str) 
             "--experiment_name",
             experiment_name,
             "--run_name",
-            run_name,
+            auto_extract_name,
         ]
-        print(f"[pipeline] extract-top: score_col={sc} → {out_dir}")
+        if ascending:
+            args.append("--ascending")
+        print(f"[pipeline] extract-top: score_col={sc} ascending={ascending} → {out_dir}")
         _run_bif_cmd(args)
+    return True
+
+
+def _step_filter_training(cfg: dict[str, Any], paths: _Paths) -> None:
+    """Filter harmful samples from target training data.
+
+    Reads the bottom-K (or top-K) extract-top output and removes matching
+    samples from the target training JSONL.  Writes the filtered result to
+    ``finetune_data/stage2_train_filtered.jsonl`` which can be used by
+    schedule-compare via the ``target_train_jsonl`` override.
+
+    Config format (under ``filter-training``):
+
+        filter-training:
+          harmful_jsonl: top_samples/corr/top_500_full.jsonl
+          match_col: doc_id
+          input_train_jsonl: finetune_data/stage2_train_*.jsonl
+    """
+    step_cfg = cfg.get("steps", {}).get("filter-training", {})
+    if not step_cfg:
+        print("[pipeline] filter-training: no config, skipping.")
+        return True
+
+    harmful_jsonl = step_cfg.get("harmful_jsonl")
+    if not harmful_jsonl:
+        print("[pipeline] filter-training: no harmful_jsonl specified, skipping.")
+        return True
+
+    if not os.path.exists(harmful_jsonl):
+        print(f"[pipeline] filter-training: {harmful_jsonl} not found, skipping.")
+        return True
+
+    match_col = step_cfg.get("match_col", "sample_id")
+    input_train = step_cfg.get("input_train_jsonl")
+    if not input_train:
+        input_train = str(paths.finetune_jsonl("train"))
+
+    if not os.path.exists(input_train):
+        print(f"[pipeline] filter-training: {input_train} not found, skipping.")
+        return True
+
+    train_rows = read_jsonl(input_train)
+    harmful_rows = read_jsonl(harmful_jsonl)
+
+    harmful_ids = set()
+    for r in harmful_rows:
+        key = str(r.get(match_col, r.get("id", "")))
+        if key:
+            harmful_ids.add(key)
+
+    train_id_col = step_cfg.get("train_id_col", "id")
+    filtered = [r for r in train_rows if str(r.get(train_id_col, r.get("id", ""))) not in harmful_ids]
+    removed = len(train_rows) - len(filtered)
+
+    out_path = str(paths.finetune_dir / "stage2_train_filtered.jsonl")
+    write_jsonl(out_path, filtered)
+
+    print(
+        f"[pipeline] filter-training: removed {removed}/{len(train_rows)} samples, "
+        f"wrote {len(filtered)} to {out_path}"
+    )
+
+    return True
 
 
 def _ds_fsdp_args(step_cfg: dict[str, Any]) -> list[str]:
@@ -1091,7 +1255,7 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
     step_cfg = cfg.get("steps", {}).get("schedule-compare", {})
     if not step_cfg:
         print("[pipeline] schedule-compare: no config, skipping.")
-        return
+        return True
 
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
@@ -1115,7 +1279,7 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
     tokenizer_path = step_cfg.get(
         "tokenizer_path", _global_tokenizer(cfg) or train_cfg.get("tokenizer_path", base_model)
     )
-    train_jsonl = str(paths.finetune_jsonl("train"))
+    train_jsonl = step_cfg.get("target_train_jsonl", str(paths.finetune_jsonl("train")))
     val_jsonl = step_cfg.get("val_jsonl", str(paths.finetune_jsonl("val")))
 
     if not base_model:
@@ -1151,7 +1315,7 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
     if score_types is None:
         score_types = []
         for sc in score_cols:
-            score_types.append("corr" if "corr" in sc else "raw")
+            score_types.append("corr" if "corr" in sc else ("loss" if "loss" in sc else "raw"))
     if isinstance(score_types, str):
         score_types = [score_types]
 
@@ -1162,13 +1326,20 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
     if isinstance(schedule_epochs, (int, float)):
         schedule_epochs = [schedule_epochs]
 
+    sched_model_tag = _resolve_model_tag(cfg.get("model_tag"), base_model)
+
     ensure_dir(str(paths.schedule_dir))
 
     if "none" in replay_modes:
         for schedule in schedules:
             for sc_ep in schedule_epochs:
                 ep_tag = f"_ep{sc_ep}" if len(schedule_epochs) > 1 else ""
-                run_name = f"{schedule}_none{ep_tag}"
+                sched_short = "seq" if schedule == "sequential" else "mix"
+                run_name = _make_replay_name(
+                    sched_model_tag, schedule, "none", 0.0,
+                )
+                if ep_tag:
+                    run_name = f"{run_name}{ep_tag}"
                 run_dir = str(paths.schedule_dir / run_name)
                 if os.path.exists(os.path.join(run_dir, "run_summary.json")):
                     print(f"[pipeline] schedule-compare: skip {run_name} (done)")
@@ -1214,8 +1385,7 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
                     "--seed",
                     str(step_cfg.get("seed", 42)),
                 ] + _ds_fsdp_args(step_cfg)
-                if experiment_name:
-                    args += ["--experiment_name", experiment_name]
+                args += ["--experiment_name", run_name]
                 _run_bif_cmd(args)
 
     for st_idx, score_type in enumerate(score_types):
@@ -1278,77 +1448,59 @@ def _step_schedule_compare(cfg: dict[str, Any], paths: _Paths, experiment_name: 
                 "--seed",
                 str(step_cfg.get("seed", 42)),
             ] + _ds_fsdp_args(step_cfg)
-            if experiment_name:
-                args += ["--experiment_name", experiment_name]
             return args
 
         other_modes = [m for m in replay_modes if m != "none"]
+        sched_model_tag = _resolve_model_tag(cfg.get("model_tag"), base_model)
         for ratio in mix_ratios:
             for sc_ep in schedule_epochs:
-                ep_tag = f"_ep{sc_ep}" if len(schedule_epochs) > 1 else ""
-                ratio_str = str(ratio).replace(".", "")
-                group_label = f"{sc_prefix}ratio{ratio_str}{ep_tag}"
+                for schedule in schedules:
+                    for replay_mode in other_modes:
+                        sched_short = "seq" if schedule == "sequential" else "mix"
+                        mode_short = "sel" if replay_mode == "selected" else "rnd"
+                        metric_prefix = f"{sched_short}_{mode_short}"
 
-                group_run_id_path = paths.schedule_dir / f".swanlab_{group_label}_run_id"
-
-            run_id = None
-            if group_run_id_path.exists():
-                run_id = group_run_id_path.read_text(encoding="utf-8").strip()
-                if not run_id:
-                    run_id = None
-
-            is_first = run_id is None
-            if is_first and local_rank == 0:
-                import swanlab
-                run_obj = swanlab.init(
-                    project=os.environ.get("SWANLAB_PROJECT", "bif"),
-                    experiment_name=group_label,
-                    config={"score_type": score_type, "replay_ratio": ratio},
-                )
-                run_id = run_obj.id
-                group_run_id_path.write_text(run_id, encoding="utf-8")
-
-            for schedule in schedules:
-                for replay_mode in other_modes:
-                    sched_short = "seq" if schedule == "sequential" else "mix"
-                    mode_short = "sel" if replay_mode == "selected" else "rnd"
-                    metric_prefix = f"{sched_short}_{mode_short}"
-
-                    run_name = f"{group_label}_{schedule}_{replay_mode}"
-                    run_dir = str(paths.schedule_dir / run_name)
-                    if os.path.exists(os.path.join(run_dir, "run_summary.json")):
-                        print(f"[pipeline] schedule-compare: skip {run_name} (done)")
-                        continue
-                    args = [
-                        "schedule-compare",
-                        "--output_dir",
-                        run_dir,
-                        "--run_name",
-                        run_name,
-                        "--schedule",
-                        schedule,
-                        "--replay_mode",
-                        replay_mode,
-                        "--replay_ratio",
-                        str(ratio),
-                    ] + _common_schedule_args(sc_ep)
-                    if run_id:
-                        args += ["--swanlab_run_id", run_id]
-                    args += ["--metric_prefix", metric_prefix]
-                    _run_bif_cmd(args)
+                        run_name = _make_replay_name(
+                            sched_model_tag, schedule, replay_mode, ratio, score_type or sc_prefix.rstrip("_"),
+                        )
+                        run_dir = str(paths.schedule_dir / run_name)
+                        if os.path.exists(os.path.join(run_dir, "run_summary.json")):
+                            print(f"[pipeline] schedule-compare: skip {run_name} (done)")
+                            continue
+                        args = [
+                            "schedule-compare",
+                            "--output_dir",
+                            run_dir,
+                            "--run_name",
+                            run_name,
+                            "--schedule",
+                            schedule,
+                            "--replay_mode",
+                            replay_mode,
+                            "--replay_ratio",
+                            str(ratio),
+                            "--experiment_name",
+                            run_name,
+                        ] + _common_schedule_args(sc_ep)
+                        args += ["--metric_prefix", metric_prefix]
+                        srp = step_cfg.get("seq_replay_position", 0.0)
+                        if srp != 0.0:
+                            args += ["--seq_replay_position", str(srp)]
+                        _run_bif_cmd(args)
 
     # Log finetune split stats
     for split in ["train", "query", "val", "test"]:
         split_path = str(paths.finetune_jsonl(split))
         if os.path.exists(split_path):
             _log_pool_data_stats(split_path, f"finetune_{split}")
+    return True
 
 
 def _step_schedule_analyze(cfg: dict[str, Any], paths: _Paths) -> None:
     """Analyze schedule comparison results and compare losses across mix ratios."""
     if not paths.schedule_dir.exists():
         print("[pipeline] schedule-analyze: no schedule_compare dir, skipping.")
-        return
+        return True
 
     data_dirs: dict[str, str] = {}
     if os.path.exists(str(paths.pool_jsonl)):
@@ -1371,6 +1523,7 @@ def _step_schedule_analyze(cfg: dict[str, Any], paths: _Paths) -> None:
         args += ["--data_dirs", f"{label}={path}"]
 
     _run_bif_cmd(args)
+    return True
 
 
 _STEP_RUNNERS: dict[str, Any] = {
@@ -1380,25 +1533,44 @@ _STEP_RUNNERS: dict[str, Any] = {
     "run-bif": _step_run_bif,
     "analyze-bif": _step_analyze_bif,
     "extract-top": _step_extract_top,
+    "filter-training": _step_filter_training,
     "schedule-compare": _step_schedule_compare,
     "schedule-analyze": _step_schedule_analyze,
 }
 
-# Steps that accept an experiment_name argument
 _STEPS_WITH_EXPERIMENT_NAME = {"train", "run-bif", "analyze-bif", "extract-top", "schedule-compare"}
 
 
-def _symlink_shared_data(data_root: str, work_dir: str) -> list[str]:
+_STEP_TO_SHARED_DIRS: dict[str, list[str]] = {
+    "build-pool": ["pool", "finetune_pool"],
+    "prepare-finetune": ["finetune_data"],
+    "train": ["train"],
+    "run-bif": ["bif_traces"],
+    "analyze-bif": ["bif_analysis"],
+    "extract-top": ["top_samples"],
+    "filter-training": [],
+}
+
+
+def _symlink_shared_data(data_root: str, work_dir: str, redo_steps: set[str] | None = None) -> list[str]:
     """Create symlinks from data_root into work_dir for shared data dirs.
 
-    Only symlinks directories that exist in data_root.  Returns the list of
-    directory names that were symlinked.
+    Only symlinks directories that exist in data_root and are NOT associated
+    with steps listed in *redo_steps*.  Returns the list of directory names
+    that were symlinked.
     """
+    redo_steps = redo_steps or set()
+    skip_dirs: set[str] = set()
+    for step in redo_steps:
+        skip_dirs.update(_STEP_TO_SHARED_DIRS.get(step, []))
+
     src = Path(data_root).resolve()
     dst = Path(work_dir)
     dst.mkdir(parents=True, exist_ok=True)
     linked: list[str] = []
     for d in _SHARED_DIRS:
+        if d in skip_dirs:
+            continue
         src_dir = src / d
         dst_link = dst / d
         if not src_dir.exists():
@@ -1414,6 +1586,24 @@ def _symlink_shared_data(data_root: str, work_dir: str) -> list[str]:
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
+
+
+def _resolve_cfg_paths(cfg: dict[str, Any], work_dir: str) -> dict[str, Any]:
+    """Recursively resolve {work_dir} placeholders in config values."""
+    resolved = {}
+    for k, v in cfg.items():
+        if isinstance(v, str):
+            resolved[k] = v.replace("{work_dir}", work_dir)
+        elif isinstance(v, dict):
+            resolved[k] = _resolve_cfg_paths(v, work_dir)
+        elif isinstance(v, list):
+            resolved[k] = [
+                item.replace("{work_dir}", work_dir) if isinstance(item, str) else item
+                for item in v
+            ]
+        else:
+            resolved[k] = v
+    return resolved
 
 
 def run_pipeline(
@@ -1437,6 +1627,7 @@ def run_pipeline(
     """
     cfg = _load_config(config_path)
     work_dir = cfg["work_dir"]
+    cfg = _resolve_cfg_paths(cfg, work_dir)
     paths = _Paths(work_dir)
     state = PipelineState.load_or_create(work_dir)
 
@@ -1446,11 +1637,15 @@ def run_pipeline(
     # schedule-compare / schedule-analyze run.  This avoids rebuilding the
     # entire PT/SFT pool and re-running BIF when only the mix_ratio changes.
     data_root = cfg.get("data_root")
+    data_root_redo = set(cfg.get("data_root_redo", []))
     if data_root:
-        linked = _symlink_shared_data(data_root, work_dir)
+        linked = _symlink_shared_data(data_root, work_dir, redo_steps=data_root_redo)
         print(f"[pipeline] data_root={data_root}")
         print(f"[pipeline] Symlinked {len(linked)} dirs: {', '.join(linked)}")
         for step in _SHARED_DATA_STEPS:
+            if step in data_root_redo:
+                print(f"[pipeline] data_root_redo: {step} — will re-run")
+                continue
             if not state.is_done(step):
                 state.mark_done(step)
                 print(f"[pipeline] Auto-completed (shared data): {step}")
@@ -1460,7 +1655,19 @@ def run_pipeline(
     # resume/join the same cloud run instead of creating a new one.
     # On restart (pipeline_run_log.json already exists), reuse the previous
     # run_id so all metrics land in the same SwanLab run.
-    experiment_name = cfg.get("experiment_name", f"pipeline_{Path(work_dir).name}")
+    bif_cfg = cfg.get("steps", {}).get("run-bif", {})
+    model_tag = _resolve_model_tag(
+        cfg.get("model_tag"), _global_base_model(cfg) or ""
+    )
+    sampler_prefix = "rmsgld" if bif_cfg.get("sampler_type") == "rmsprop_sgld" else "sgld"
+    lr = float(bif_cfg.get("lr", 5e-6))
+    gamma = float(bif_cfg.get("gamma", 1e-3))
+    draws = int(bif_cfg.get("draws_per_chain", 60))
+    burn_in = int(bif_cfg.get("num_burnin_steps", bif_cfg.get("burn_in", 0)))
+    _auto_experiment_name = (
+        f"{model_tag}-{sampler_prefix}-lr{_fmt_lr(lr)}-g{gamma}-d{draws}-b{burn_in}"
+    )
+    experiment_name = cfg.get("experiment_name", _auto_experiment_name)
     run_log_path = Path(work_dir) / "pipeline_run_log.json"
     if new_run:
         pipeline_run_id = uuid.uuid4().hex
@@ -1489,7 +1696,7 @@ def run_pipeline(
     os.environ[_ENV_PIPELINE_RUN_ID] = pipeline_run_id
     os.environ[_ENV_PIPELINE_EXPERIMENT] = experiment_name
 
-    project_name = cfg.get("project_name", "bif")
+    project_name = cfg.get("project_name", "BIFrost")
     os.environ[_ENV_SWAN_PROJECT] = project_name
 
     cuda_vis = cfg.get("cuda_visible_devices")

@@ -137,6 +137,7 @@ steps:
   # ─── 4. run-bif ──────────────────────────────────────────────────────────
   # SGLD sampling to collect BIF traces at each checkpoint.
   run-bif:
+    sampler_type: rmsprop_sgld               # sgld | rmsprop_sgld (recommended)
     max_length: 1024                       # default: 1024
     num_chains: 1                          # default: 4
     draws_per_chain: 100                   # default: 60
@@ -145,7 +146,11 @@ steps:
     lr: 1e-5                               # default: 5e-6
     gamma: 1e-4                            # default: 1e-3
     noise_scale: 2.0                       # default: 1.0
-    # beta: 1.0                            # default: 1.0
+    beta: 0.125                            # default: 1.0
+    nbeta_mode: devinterp                  # devinterp (default) | dataset
+    # nbeta: 0.0                           # override nbeta directly (0 = auto)
+    batches_per_draw: 3                    # mini-batches per SGLD step (0 = full dataset)
+    gradient_accumulation_steps: 1         # default: 1
     # grad_clip: 1.0                       # default: None
     train_batch_size: 32                   # default: 16
     eval_batch_size: 64                    # default: 32

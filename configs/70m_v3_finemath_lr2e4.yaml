@@ -56,6 +56,7 @@ steps:
     master_port: 29590
 
   run-bif:
+    sampler_type: rmsprop_sgld
     max_length: 1024
     num_chains: 1
     draws_per_chain: 100
@@ -64,6 +65,8 @@ steps:
     lr: 1e-5
     gamma: 1e-4
     noise_scale: 2.0
+    nbeta_mode: devinterp
+    batches_per_draw: 3
     train_batch_size: 32
     eval_batch_size: 64
     pool_eval_subset: 0

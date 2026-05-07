@@ -117,8 +117,8 @@ def main() -> None:
     p_train.add_argument("--target_num_checkpoints", type=int, default=6)
     p_train.add_argument(
         "--experiment_name",
-        default="stage2_train",
-        help="SwanLab experiment name for this training run.",
+        default=None,
+        help="SwanLab experiment name. Auto-generated from params if not set.",
     )
     p_train.add_argument(
         "--run_name",
@@ -165,9 +165,10 @@ def main() -> None:
         "--fsdp_transformer_layer_cls_to_wrap", default=None,
         help="Transformer layer class name for FSDP auto-wrap",
     )
-    p_sched.add_argument("--experiment_name", default="replay_train")
+    p_sched.add_argument("--experiment_name", default=None)
     p_sched.add_argument("--swanlab_run_id", default=None)
     p_sched.add_argument("--metric_prefix", default="")
+    p_sched.add_argument("--seq_replay_position", type=float, default=0.0)
 
     # --- analysis ---
     p_run = sub.add_parser("run-bif", help="Run BIF trace collection")
@@ -199,19 +200,50 @@ def main() -> None:
     p_run.add_argument("--lr", type=float, default=5e-6)
     p_run.add_argument("--gamma", type=float, default=1e-3)
     p_run.add_argument("--beta", type=float, default=1.0)
-    p_run.add_argument("--noise_scale", type=float, default=1.0)
-    p_run.add_argument("--burn_in", type=int, default=0)
-    p_run.add_argument("--thinning", type=int, default=1)
+    p_run.add_argument("--nbeta_mode", type=str, default="devinterp", choices=["devinterp", "dataset"])
+    p_run.add_argument("--nbeta", type=float, default=0.0)
+    p_run.add_argument("--noise_level", type=float, default=1.0)
+    p_run.add_argument("--num_burnin_steps", type=int, default=0)
+    p_run.add_argument("--num_steps_bw_draws", type=int, default=1)
     p_run.add_argument("--seed", type=int, default=42)
     p_run.add_argument("--grad_clip", type=float, default=None)
     p_run.add_argument("--weight_decay", type=float, default=0.0)
+    p_run.add_argument(
+        "--sampler_type",
+        default="sgld",
+        choices=["sgld", "rmsprop_sgld"],
+        help="SGLD sampler type: vanilla 'sgld' or 'rmsprop_sgld' for preconditioned.",
+    )
+    p_run.add_argument("--rmsprop_alpha", type=float, default=0.99)
+    p_run.add_argument("--rmsprop_eps", type=float, default=1e-1)
+    p_run.add_argument("--batches_per_draw", type=int, default=0)
+    p_run.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    p_run.add_argument(
+        "--chain_id",
+        type=int,
+        default=None,
+        help=(
+            "Run only this single chain (0-indexed) without DDP. "
+            "Use with run-bif-parallel.sh to parallelize chains across GPUs."
+        ),
+    )
+    p_run.add_argument(
+        "--checkpoints",
+        default=None,
+        help="Comma-separated checkpoint names to process (e.g., 'final_model').",
+    )
     p_run.add_argument(
         "--dtype", default="float32", choices=["float32", "float16", "bfloat16"]
     )
     p_run.add_argument(
         "--experiment_name",
         default=None,
-        help="SwanLab experiment name for this BIF run.",
+        help="SwanLab experiment name. Auto-generated from params if not set.",
+    )
+    p_run.add_argument(
+        "--model_tag",
+        default=None,
+        help="Short model tag for experiment naming (e.g. '70m'). Auto-detected if not set.",
     )
     p_run.add_argument(
         "--run_name",
@@ -222,12 +254,25 @@ def main() -> None:
     p_analyze = sub.add_parser("analyze-bif", help="Analyze BIF results")
     p_analyze.add_argument("--bif_root", required=True)
     p_analyze.add_argument("--out_dir", required=True)
-    p_analyze.add_argument("--score_col", default="raw_cov_avg_over_queries")
+    p_analyze.add_argument("--score_col", default="bif_mean")
     p_analyze.add_argument("--top_k", type=int, default=500)
     p_analyze.add_argument(
+        "--negate_scores",
+        action="store_true",
+        default=False,
+        help="Negate raw/corr score averages. "
+             "By default scores are NOT negated (higher = more influential).",
+    )
+    p_analyze.add_argument(
+        "--no-negate_scores",
+        dest="negate_scores",
+        action="store_false",
+        help="Do NOT negate scores (default behaviour).",
+    )
+    p_analyze.add_argument(
         "--experiment_name",
-        default="bif_analysis",
-        help="SwanLab experiment name for this analysis run.",
+        default=None,
+        help="SwanLab experiment name. Auto-generated from params if not set.",
     )
     p_analyze.add_argument(
         "--run_name",
@@ -248,9 +293,14 @@ def main() -> None:
     p_extract.add_argument("--preview_chars", type=int, default=600)
     p_extract.add_argument("--restrict_source_topn_to_topk", action="store_true")
     p_extract.add_argument(
+        "--ascending",
+        action="store_true",
+        help="Sort ascending (select bottom-K / most harmful samples instead of top-K).",
+    )
+    p_extract.add_argument(
         "--experiment_name",
-        default="bif_extraction",
-        help="SwanLab experiment name for this extraction run.",
+        default=None,
+        help="SwanLab experiment name. Auto-generated from params if not set.",
     )
     p_extract.add_argument(
         "--run_name",
@@ -495,6 +545,7 @@ def main() -> None:
             fsdp=args.fsdp,
             fsdp_transformer_layer_cls_to_wrap=args.fsdp_transformer_layer_cls_to_wrap,
             experiment_name=args.experiment_name,
+            seq_replay_position=getattr(args, "seq_replay_position", 0.0),
         )
 
     elif args.command == "run-bif":
@@ -530,14 +581,26 @@ def main() -> None:
         _argv += ["--lr", str(args.lr)]
         _argv += ["--gamma", str(args.gamma)]
         _argv += ["--beta", str(args.beta)]
-        _argv += ["--noise_scale", str(args.noise_scale)]
-        _argv += ["--burn_in", str(args.burn_in)]
-        _argv += ["--thinning", str(args.thinning)]
+        _argv += ["--nbeta_mode", str(args.nbeta_mode)]
+        if getattr(args, "nbeta", 0.0) > 0:
+            _argv += ["--nbeta", str(args.nbeta)]
+        _argv += ["--noise_level", str(args.noise_level)]
+        _argv += ["--num_burnin_steps", str(args.num_burnin_steps)]
+        _argv += ["--num_steps_bw_draws", str(args.num_steps_bw_draws)]
         _argv += ["--seed", str(args.seed)]
         if args.grad_clip is not None:
             _argv += ["--grad_clip", str(args.grad_clip)]
         _argv += ["--weight_decay", str(args.weight_decay)]
+        _argv += ["--sampler_type", args.sampler_type]
+        _argv += ["--rmsprop_alpha", str(args.rmsprop_alpha)]
+        _argv += ["--rmsprop_eps", str(args.rmsprop_eps)]
+        _argv += ["--batches_per_draw", str(args.batches_per_draw)]
+        _argv += ["--gradient_accumulation_steps", str(args.gradient_accumulation_steps)]
+        if args.chain_id is not None:
+            _argv += ["--chain_id", str(args.chain_id)]
         _argv += ["--dtype", args.dtype]
+        if args.checkpoints is not None:
+            _argv += ["--checkpoints", args.checkpoints]
         if args.experiment_name is not None:
             _argv += ["--experiment_name", args.experiment_name]
         if args.run_name is not None:
@@ -560,6 +623,7 @@ def main() -> None:
             top_k=args.top_k,
             experiment_name=args.experiment_name,
             run_name=args.run_name,
+            negate_scores=args.negate_scores,
         )
 
     elif args.command == "extract-top":
@@ -577,6 +641,7 @@ def main() -> None:
             top_n_per_source=args.top_n_per_source,
             preview_chars=args.preview_chars,
             restrict_source_topn_to_topk=args.restrict_source_topn_to_topk,
+            ascending=args.ascending,
             experiment_name=args.experiment_name,
             run_name=args.run_name,
         )

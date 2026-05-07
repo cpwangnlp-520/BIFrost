@@ -40,6 +40,7 @@ from bif.training.callbacks import (
     infer_interval,
     log_eval_step0,
 )
+from bif.utils.naming import guess_model_tag, make_replay_name
 from bif.utils.tracker import finish, init_run
 
 
@@ -68,14 +69,17 @@ def _build_training_data(
     target_rows: list[dict[str, Any]],
     replay_rows: list[dict[str, Any]],
     seed: int,
+    seq_replay_position: float = 0.0,
 ) -> tuple[list[dict[str, Any]], list[str] | None]:
     n_target = len(target_rows)
     n_replay = len(replay_rows)
     if n_replay == 0:
         return list(target_rows), None
     if schedule == "sequential":
-        rows = list(replay_rows) + list(target_rows)
-        labels = ["replay"] * n_replay + ["target"] * n_target
+        pos = max(0.0, min(1.0, seq_replay_position))
+        split_idx = int(n_target * pos)
+        rows = list(target_rows[:split_idx]) + list(replay_rows) + list(target_rows[split_idx:])
+        labels = ["target"] * split_idx + ["replay"] * n_replay + ["target"] * (n_target - split_idx)
     elif schedule == "proportional":
         rows = list(target_rows) + list(replay_rows)
         labels = ["target"] * n_target + ["replay"] * n_replay
@@ -122,9 +126,9 @@ def train_schedule_compare(
     deepspeed: str | None = None,
     fsdp: str = "",
     fsdp_transformer_layer_cls_to_wrap: str | None = None,
-    experiment_name: str = "replay_train",
+    seq_replay_position: float = 0.0,
+    experiment_name: str | None = None,
     manage_tracking: bool = True,
-    swanlab_run_id: str | None = None,
     metric_prefix: str = "",
 ) -> dict[str, Any]:
     set_seed(seed)
@@ -156,7 +160,7 @@ def train_schedule_compare(
         )
 
     train_rows, group_labels = _build_training_data(
-        schedule, target_rows, replay_rows, seed
+        schedule, target_rows, replay_rows, seed, seq_replay_position
     )
     n_target = len(target_rows)
     n_replay = len(replay_rows)
@@ -200,28 +204,23 @@ def train_schedule_compare(
     history_cb = _LossLogCallback()
     callbacks = [history_cb, _GradNormCallback()]
     if local_rank == 0 and manage_tracking:
-        if swanlab_run_id:
-            import swanlab
-            swanlab.init(
-                project=os.environ.get("SWANLAB_PROJECT", "bif"),
-                experiment_name=experiment_name,
-                id=swanlab_run_id,
-                resume="allow",
-            )
-        else:
-            init_run(
-                experiment_name=experiment_name,
-                run_name=run_name,
-                config={
-                    "base_model": base_model_path,
-                    "schedule": schedule,
-                    "replay_mode": replay_mode,
-                    "replay_ratio": replay_ratio,
-                    "learning_rate": learning_rate,
-                    "n_target": n_target,
-                    "n_replay": n_replay,
-                },
-            )
+        auto_name = make_replay_name(
+            guess_model_tag(base_model_path),
+            schedule, replay_mode, replay_ratio,
+        )
+        init_run(
+            experiment_name=experiment_name or auto_name,
+            run_name=run_name,
+            config={
+                "base_model": base_model_path,
+                "schedule": schedule,
+                "replay_mode": replay_mode,
+                "replay_ratio": replay_ratio,
+                "learning_rate": learning_rate,
+                "n_target": n_target,
+                "n_replay": n_replay,
+            },
+        )
         callbacks.append(_SwanLogCallback(metric_prefix=metric_prefix))
 
     load_best = can_load_best_model(deepspeed, fsdp)
@@ -335,12 +334,7 @@ def train_schedule_compare(
     )
 
     if local_rank == 0 and manage_tracking:
-        if swanlab_run_id:
-            import swanlab
-            if swanlab.get_run() is not None:
-                swanlab.finish()
-        else:
-            finish()
+        finish()
 
     return {
         "run_name": run_name,
@@ -388,9 +382,9 @@ def main() -> None:
     parser.add_argument("--deepspeed", default=None)
     parser.add_argument("--fsdp", default="")
     parser.add_argument("--fsdp_transformer_layer_cls_to_wrap", default=None)
-    parser.add_argument("--experiment_name", default="replay_train")
-    parser.add_argument("--swanlab_run_id", default=None)
+    parser.add_argument("--experiment_name", default=None)
     parser.add_argument("--metric_prefix", default="")
+    parser.add_argument("--seq_replay_position", type=float, default=0.0)
     args = parser.parse_args()
 
     result = train_schedule_compare(**vars(args))

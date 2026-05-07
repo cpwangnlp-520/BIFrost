@@ -7,223 +7,233 @@
 ## Installation
 
 ```bash
-pip install -e ".[dev]"
+git clone <repo_url> && cd BIFrost
+pip install -e .
 ```
+
+### SwanLab Setup (Experiment Tracking)
+
+BIFrost uses [SwanLab](https://swanlab.cn) for experiment tracking and visualization.
+
+```bash
+# 1. Register at https://swanlab.cn and get your API key
+# 2. Set environment variable:
+export SWANLAB_API_KEY=<your_api_key>
+
+# For quick local tests without cloud upload:
+export SWANLAB_MODE=disabled
+```
+
+SwanLab naming convention:
+- **Project**: `BIFrost` (fixed)
+- **Experiment name**: auto-generated from run-bif params, e.g. `70m-rmsgld-lr5e-6-g1000-d2000-b200`
+- Override by setting `experiment_name` in the config YAML
 
 ---
 
 ## Quick Start
 
-```bash
-bifrost pipeline run --config configs/my_experiment.yaml
+### 1. Set your model path
+
+Edit `configs/quick_test.yaml` and replace `/path/to/pythia-70m` with your local model path:
+
+```yaml
+tokenizer_path: /your/model/path
+base_model_path: /your/model/path
 ```
+
+### 2. Run the quick test (~2 min on single GPU)
+
+```bash
+# Option A: via pipeline (recommended)
+python -m bif.cli pipeline run --config configs/quick_test.yaml
+
+# Option B: BIF sampling only (skip pipeline)
+bash scripts/quick_test.sh
+```
+
+### 3. Run the full small-pool experiment
+
+```bash
+# Edit configs/small_pool_exp.yaml — set tokenizer_path and base_model_path
+python -m bif.cli pipeline run --config configs/small_pool_exp.yaml
+```
+
+### Resume after interruption
+
+```bash
+python -m bif.cli pipeline run --config configs/small_pool_exp.yaml --resume
+```
+
+### Start from a specific step
+
+```bash
+# Skip to BIF influence scoring (assumes train is done)
+python -m bif.cli pipeline run --config configs/small_pool_exp.yaml --from run-bif --resume
+```
+
+### Check pipeline status
+
+```bash
+python -m bif.cli pipeline status --config configs/small_pool_exp.yaml
+```
+
+---
+
+## Configuration
+
+### Key Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `sampler_type` | `sgld` | SGLD sampler: `sgld` or `rmsprop_sgld` (recommended) |
+| `nbeta_mode` | `devinterp` | N×β computation: `devinterp` (effective_bs/log(effective_bs)) or `dataset` (β×N) |
+| `nbeta` | `0` | Override nbeta directly (0 = auto-compute from nbeta_mode) |
+| `num_chains` | `4` | Number of independent SGLD chains |
+| `draws_per_chain` | `60` | Number of samples to draw per chain |
+| `burn_in` | `0` | Number of burn-in steps before collecting draws |
+| `thinning` | `1` | Steps between consecutive draws |
+| `batches_per_draw` | `0` | Mini-batches per SGLD step (0 = full dataset) |
+| `lr` | `5e-6` | SGLD learning rate |
+| `gamma` | `1e-3` | Localization strength (prior variance) |
+| `beta` | `1.0` | Inverse temperature |
+| `dtype` | `float32` | Model dtype: `float32`, `float16`, or `bfloat16` |
+
+### nbeta_mode
+
+The `nbeta` parameter controls gradient scaling in SGLD. Two modes are available:
+
+- **`devinterp`** (default): `nbeta = effective_batch_size / log(effective_batch_size)`. Matches the [devinterp](https://github.com/mackelab/devinterp) reference implementation. Recommended for compatibility.
+
+- **`dataset`**: `nbeta = beta * N` where N is the source dataset size. This is the exact Bayesian interpretation.
+
+These differ significantly — for typical params (β=0.125, N=800, effective_bs=24), devinterp gives nbeta≈7.55 while dataset gives nbeta=100.
+
+### Included Data Files
+
+```
+data/
+├── pool_800.jsonl                    # 800 PT samples from 5 sources (BIF scoring pool)
+├── pool_gsm8k_20.jsonl               # 20 GSM8K with CoT answers (finetune pool, split by pipeline)
+├── query_gsm8k_20.jsonl              # 20 GSM8K questions (for standalone run-bif, not needed in pipeline)
+└── query_gsm8k_20_with_answer.jsonl  # 20 GSM8K with answer_start_char (standalone use)
+```
+
+Pipeline mode only needs `pool_800.jsonl` + `pool_gsm8k_20.jsonl`. The pipeline automatically splits the finetune pool into train/query/val/test.
+
+The other two query files are for standalone `run-bif` usage (e.g. `bifrost run-bif --query_jsonl data/query_gsm8k_20.jsonl`).
 
 ---
 
 ## Full Pipeline
 
-### 1. Write an experiment config
+### Pipeline Steps
 
-Configs are YAML files. See [`configs/`] for full examples.
+| Step | What happens |
+|------|-------------|
+| `build-pool` | Build or symlink PT pool + optional finetune pool |
+| `prepare-finetune` | Split finetune pool into train/query/val/test |
+| `train` | Fine-tune base model, saving periodic checkpoints |
+| `run-bif` | Run SGLD sampling at each checkpoint |
+| `analyze-bif` | Compute influence scores and diagnostics |
+| `extract-top` | Extract top-K most influential samples |
+| `schedule-compare` | Train with selected vs random replay |
+| `schedule-analyze` | Compare eval losses across strategies |
+
+### Config File Format
+
+Configs are YAML files. See [`configs/`] for examples.
 
 ```yaml
 tokenizer_path: /models/pythia-70m
 base_model_path: /models/pythia-70m
-
-work_dir: /workspace/my_experiment
-experiment_name: my_experiment
+work_dir: ./runs/my_experiment
+# experiment_name: my-custom-name   # auto-generated if not set, e.g. 70m-rmsgld-lr5e-6-g1000-d2000-b200
+# project_name: BIFrost             # default: BIFrost
 
 steps:
-
   build-pool:
-    total_tokens: 10M
-    domains: nemotron_math,octothinker,fineweb_edu,c4,wikipedia
-    ratios: nemotron_math:0.1,octothinker:0.2,fineweb_edu:0.3,c4:0.2,wikipedia:0.2
-    min_chars: 200
-    min_tokens: 50
-    max_tokens: 4096
-    seed: 42
-
-    finetune:
-      total_tokens: 10M
-      domains: nemotron_math
-      seed: 42
+    pool_jsonl: data/pool_800.jsonl
+    finetune_pool_jsonl: data/pool_gsm8k_20.jsonl
 
   prepare-finetune:
     train_ratio: 0.7
     query_ratio: 0.1
-    val_ratio: 0.1
-    test_ratio: 0.1
-    min_int_score: 4
 
   train:
-    num_train_epochs: 1.0
+    num_train_epochs: 1
     learning_rate: 2e-4
-    target_num_checkpoints: 6
     bf16: true
 
   run-bif:
+    sampler_type: rmsprop_sgld
     num_chains: 4
-    draws_per_chain: 60
+    draws_per_chain: 2000
+    nbeta_mode: devinterp
+    lr: 5e-6
+    gamma: 1000
+    beta: 0.125
     dtype: bfloat16
 
   analyze-bif:
-    score_col: raw_cov_avg_over_queries
+    score_col: cross_cov_avg_over_queries
     top_k: 500
 
   extract-top:
     top_k: 500
 
   schedule-compare:
-    replay_modes: [selected, random]
     schedules: [sequential, mixed]
+    replay_modes: [selected, random, none]
     mix_ratios: [0.2]
-    learning_rate: 2e-4
-    num_train_epochs: 1
     bf16: true
 
   schedule-analyze: {}
 ```
 
-> **Automatic path resolution**: intermediate paths between steps (`pool_jsonl`, `train_jsonl`, etc.) are derived from `work_dir`. Only external inputs (model paths, raw data) need to be specified.
+> **Automatic path resolution**: intermediate paths between steps are derived from `work_dir`. Only external inputs (model paths, raw data) need to be specified.
 
-### 2. Run / Resume
-
-```bash
-# Run the full pipeline from scratch
-bifrost pipeline run --config configs/my_experiment.yaml
-
-# Completed steps are automatically skipped
-bifrost pipeline run --config configs/my_experiment.yaml
-
-# Start from a specific step
-bifrost pipeline run --config configs/my_experiment.yaml --from run-bif
-
-# Force a new SwanLab run ID
-bifrost pipeline run --config configs/my_experiment.yaml --new-run
-
-# Check completion status
-bifrost pipeline status --config configs/my_experiment.yaml
-```
-
-### 3. Reuse data from a previous run
-
-Set `data_root` to symlink shared data from another run, auto-completing steps 1–6:
-
-```yaml
-work_dir: /workspace/new_experiment
-data_root: /workspace/previous_experiment
-steps:
-  schedule-compare:
-    replay_modes: [selected, random]
-    ...
-```
-
----
-
-## How It Works
-
-BIFrost implements a 3-phase pipeline:
-
-1. **SGLD Sampling** (`run-bif`): For each model checkpoint, run Localized SGLD to perturb parameters and collect per-sample loss traces on both the **pool** set and the **query** set.
-
-2. **Influence Scoring** (`analyze-bif`): Compute influence scores from the traces. The primary metric is `raw_cov_avg_over_queries` — the average covariance between pool-sample loss changes and query-set loss changes across SGLD draws. High positive covariance means the pool sample is "aligned" with the query objective.
-
-3. **Replay Comparison** (`schedule-compare`): Train with the top-K most influential samples (selected) vs. random samples at various mix ratios and schedules (sequential or mixed), then compare eval losses.
+> **Using pre-built data**: Point `pool_jsonl` and `finetune_pool_jsonl` directly at existing JSONL files to skip pool construction.
 
 ---
 
 ## Individual Steps (CLI)
 
-Each step can be invoked independently.
-
-### build-pool — Build a multi-domain data pool
-
-```bash
-bifrost build-pool-v2 \
-    --total_tokens 10M \
-    --domains nemotron_math,octothinker,fineweb_edu,c4,wikipedia \
-    --ratios nemotron_math:0.1,octothinker:0.2,fineweb_edu:0.3,c4:0.2,wikipedia:0.2 \
-    --out_dir /exp/pool
-```
-
-Supported domains: `nemotron_math`, `octothinker`, `finemath`, `fineweb_edu`, `c4`, `wikipedia`, `slimpajama`, `starcoder`, `flan`, `sft_chat`
-
-### prepare-finetune — Clean and split fine-tuning data
-
-```bash
-bifrost prepare-finetune \
-    --input_path     /exp/finetune_pool/finetune_pool.jsonl \
-    --tokenizer_path /models/pythia-70m \
-    --out_dir        /exp/finetune_data \
-    --train_ratio 0.7 --query_ratio 0.1 --val_ratio 0.1 --test_ratio 0.1
-```
-
-### train — Fine-tuning with periodic checkpoints
-
-```bash
-bifrost train \
-    --base_model_path /models/pythia-70m \
-    --tokenizer_path  /models/pythia-70m \
-    --train_jsonl     /exp/finetune_data/stage2_train_1846.jsonl \
-    --val_jsonl       /exp/finetune_data/stage2_val_263.jsonl \
-    --output_dir      /exp/train \
-    --bf16 --gradient_checkpointing
-```
+Each step can be invoked independently via `bifrost <step>`.
 
 ### run-bif — SGLD sampling and loss trace collection
 
 ```bash
 bifrost run-bif \
-    --model_root          /exp/train \
-    --run_all_checkpoints \
-    --pool_jsonl          /exp/pool/pt_pool.jsonl \
-    --query_jsonl         /exp/finetune_data/stage2_query_263.jsonl \
-    --out_dir             /exp/bif_traces \
-    --num_chains 1 --draws_per_chain 100 --dtype bfloat16
+    --model_name_or_path /models/pythia-70m \
+    --pool_jsonl  data/pool_800.jsonl \
+    --query_jsonl data/query_gsm8k_20.jsonl \
+    --out_dir     ./runs/bif_traces \
+    --sampler_type rmsprop_sgld \
+    --num_chains 2 --draws_per_chain 50 \
+    --nbeta_mode devinterp \
+    --dtype bfloat16
 ```
 
 ### analyze-bif — Compute influence scores
 
 ```bash
 bifrost analyze-bif \
-    --bif_root /exp/bif_traces \
-    --out_dir  /exp/bif_analysis \
-    --score_col raw_cov_avg_over_queries \
-    --top_k    500
+    --bif_root  ./runs/bif_traces \
+    --out_dir   ./runs/bif_analysis \
+    --score_col cross_cov_avg_over_queries \
+    --top_k     500
 ```
 
 ### extract-top — Extract highest-influence samples
 
 ```bash
 bifrost extract-top \
-    --pool_jsonl  /exp/pool/pt_pool.jsonl \
-    --ranking_csv /exp/bif_analysis/final_model/pool_scores.csv \
-    --out_dir     /exp/top_samples \
+    --pool_jsonl  data/pool_800.jsonl \
+    --ranking_csv ./runs/bif_analysis/final_model/pool_scores.csv \
+    --out_dir     ./runs/top_samples \
     --top_k       500
 ```
-
-### schedule-compare — Replay schedule comparison
-
-```bash
-bifrost schedule-compare \
-    --base_model_path    /models/pythia-70m \
-    --target_train_jsonl /exp/finetune_data/stage2_train_1846.jsonl \
-    --target_val_jsonl   /exp/finetune_data/stage2_val_263.jsonl \
-    --replay_pool_jsonl  /exp/top_samples/top_500_full.jsonl \
-    --schedule           mixed \
-    --replay_mode        selected \
-    --replay_ratio       0.2 \
-    --bf16 --gradient_checkpointing
-```
-
-Replay modes: `selected` (BIF-ranked), `random`, `top_random`, `none` (baseline)
-
----
-
-## Experiment Tracking (SwanLab)
-
-BIFrost integrates with [SwanLab](https://swanlab.cn) for experiment tracking. All steps share a single SwanLab run in pipeline mode.
 
 ---
 
@@ -263,8 +273,6 @@ src/bif/
 ├── cli.py                    # unified CLI entry point
 ├── pipeline.py               # full-pipeline orchestration with state persistence
 ├── config.py                 # SGLDConfig and ReplayTrainConfig
-├── constants.py              # shared constants
-├── io.py                     # shared IO utilities
 ├── data/
 │   ├── build_pool.py         # multi-domain pool construction
 │   ├── finetune.py           # data cleaning and splitting
@@ -272,12 +280,12 @@ src/bif/
 ├── training/
 │   ├── checkpoint_trainer.py # HuggingFace Trainer fine-tuning
 │   ├── schedule_trainer.py   # replay schedule comparison
-│   ├── sgld.py               # Localized SGLD sampler
+│   ├── sgld.py               # Localized SGLD + RMSprop-SGLD samplers
 │   ├── loss.py               # per-example causal LM loss
 │   └── callbacks.py          # CPTTrainer, ReplayTrainer, SwanLab callbacks
 ├── analysis/
 │   ├── bif_runner.py         # SGLD sampling loop
-│   ├── bif_analyzer.py       # influence scoring
+│   ├── bif_analyzer.py       # influence scoring + diagnostics
 │   ├── extractor.py          # top-k extraction
 │   └── schedule_analyzer.py  # schedule comparison analysis
 └── utils/

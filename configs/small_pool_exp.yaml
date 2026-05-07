@@ -1,0 +1,110 @@
+# BIFrost — Small Pool Experiment
+# 800 PT pool samples + 20 GSM8K queries on Pythia-70M
+#
+# Prerequisites:
+#   1. Set MODEL_PATH below to your local model path (e.g. Pythia-70M)
+#   2. export SWANLAB_API_KEY=<your_token>
+#   3. pip install -e .
+#
+# SwanLab naming:
+#   project:  BIFrost (fixed)
+#   experiment: auto-generated, e.g. 70m-rmsgld-lr5e-6-g1000-d2000-b200
+#   Override by setting experiment_name below.
+#
+# Usage:
+#   python -m bif.cli pipeline run --config configs/small_pool_exp.yaml
+#
+# Resume:
+#   python -m bif.cli pipeline run --config configs/small_pool_exp.yaml --resume
+
+# >>> SET THESE TO YOUR LOCAL PATHS <<<
+tokenizer_path: /path/to/pythia-70m
+base_model_path: /path/to/pythia-70m
+
+work_dir: ./runs/small_pool_exp
+
+# experiment_name: my-custom-name   # uncomment to override auto-naming
+# project_name: BIFrost             # default: BIFrost
+
+steps:
+
+  build-pool:
+    # pool_800.jsonl: 800 PT samples for BIF influence scoring
+    pool_jsonl: data/pool_800.jsonl
+    # pool_gsm8k_20.jsonl: 20 GSM8K with CoT answers, will be split into train/query/val/test
+    finetune_pool_jsonl: data/pool_gsm8k_20.jsonl
+
+  prepare-finetune:
+    train_ratio: 0.5
+    query_ratio: 0.2
+    val_ratio: 0.15
+    test_ratio: 0.15
+    min_chars: 10
+    min_token_count: 10
+    max_token_count: 4096
+    min_int_score: 0
+    min_language_score: 0.0
+
+  train:
+    num_train_epochs: 1
+    learning_rate: 2e-4
+    per_device_train_batch_size: 8
+    per_device_eval_batch_size: 8
+    gradient_accumulation_steps: 1
+    max_length: 256
+    target_num_checkpoints: 3
+    warmup_ratio: 0.03
+    logging_steps: 5
+    bf16: true
+    gradient_checkpointing: true
+
+  run-bif:
+    sampler_type: rmsprop_sgld
+    max_length: 256
+    num_chains: 5
+    draws_per_chain: 2000
+    burn_in: 200
+    thinning: 10
+    lr: 5e-6
+    gamma: 1000
+    beta: 0.125
+    nbeta_mode: devinterp
+    noise_scale: 1.0
+    train_batch_size: 32
+    eval_batch_size: 32
+    batches_per_draw: 3
+    gradient_accumulation_steps: 1
+    dtype: bfloat16
+
+  analyze-bif:
+    score_col: cross_cov_avg_over_queries
+    top_k: 150
+
+  extract-top:
+    top_k: 150
+    score_cols:
+      - cross_cov_avg_over_queries
+
+  schedule-compare:
+    schedules:
+      - sequential
+      - mixed
+    replay_modes:
+      - selected
+      - random
+      - none
+    mix_ratios:
+      - 0.2
+    num_train_epochs: 1
+    learning_rate: 2e-4
+    per_device_train_batch_size: 8
+    per_device_eval_batch_size: 8
+    gradient_accumulation_steps: 1
+    max_length: 256
+    logging_steps: 5
+    eval_steps: 10
+    bf16: true
+    gradient_checkpointing: true
+    seed: 42
+
+  schedule-analyze: {}
