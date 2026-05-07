@@ -1,0 +1,32 @@
+tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+base_model_path: /workspace/pku_percy/models/pythia-70m-step1000
+work_dir: ./runs/hp_sweep/phase1_coarse/lr1e-4_g1_nb10
+experiment_name: sweep-phase1_coarse-lr1e-4_g1_nb10
+project_name: BIFrost-HP-Sweep
+data_root: ./runs/hp_sweep/_shared_train
+data_root_redo:
+- run-bif
+- analyze-bif
+- extract-top
+steps:
+  run-bif:
+    sampler_type: rmsprop_sgld
+    max_length: 128
+    num_chains: 2
+    draws_per_chain: 200
+    burn_in: 50
+    thinning: 1
+    lr: 0.0001
+    gamma: 1
+    nbeta: 10
+    nbeta_mode: devinterp
+    beta: 0.125
+    noise_scale: 1.0
+    train_batch_size: 8
+    eval_batch_size: 8
+    batches_per_draw: 3
+    gradient_accumulation_steps: 1
+    dtype: bfloat16
+  analyze-bif:
+    score_col: cross_cov_avg_over_queries
+    top_k: 20

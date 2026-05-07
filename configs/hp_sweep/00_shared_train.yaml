@@ -1,0 +1,35 @@
+tokenizer_path: /workspace/pku_percy/models/pythia-70m-step1000
+base_model_path: /workspace/pku_percy/models/pythia-70m-step1000
+work_dir: ./runs/hp_sweep/_shared_train
+project_name: BIFrost-HP-Sweep
+steps:
+  build-pool:
+    pool_jsonl: data/pool_800.jsonl
+    finetune_pool_jsonl: data/pool_gsm8k_20.jsonl
+  prepare-finetune:
+    train_ratio: 0.5
+    query_ratio: 0.2
+    val_ratio: 0.15
+    test_ratio: 0.15
+    min_chars: 10
+    min_token_count: 10
+    max_token_count: 4096
+    min_int_score: 0
+    min_language_score: 0.0
+  train:
+    num_train_epochs: 1
+    learning_rate: 0.0002
+    per_device_train_batch_size: 8
+    per_device_eval_batch_size: 8
+    gradient_accumulation_steps: 1
+    max_length: 256
+    target_num_checkpoints: 3
+    warmup_ratio: 0.03
+    logging_steps: 5
+    bf16: true
+    gradient_checkpointing: true
+  run-bif: null
+  analyze-bif: null
+  extract-top: null
+  schedule-compare: null
+  schedule-analyze: null
