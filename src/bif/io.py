@@ -22,6 +22,10 @@ def read_json(path: str) -> dict[str, Any]:
 
 
 def read_jsonl(path: str) -> list[dict[str, Any]]:
+    if path.endswith(".parquet"):
+        import pandas as pd
+        df = pd.read_parquet(path)
+        return df.to_dict(orient="records")
     rows: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as f:
         for line_no, line in enumerate(f, 1):

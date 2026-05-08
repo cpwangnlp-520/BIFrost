@@ -38,6 +38,9 @@ def train_with_checkpoints(
     val_jsonl: str,
     output_dir: str,
     text_key: str = "text",
+    loss_mode: str = "full",
+    prompt_key: str = "prompt",
+    response_key: str = "response",
     max_length: int = 512,
     seed: int = 42,
     num_train_epochs: float = 1.0,
@@ -81,8 +84,10 @@ def train_with_checkpoints(
 
     train_rows = read_jsonl(train_jsonl)
     val_rows = read_jsonl(val_jsonl)
-    train_ds = LMTextDataset(train_rows, tokenizer, max_length, text_key)
-    val_ds = LMTextDataset(val_rows, tokenizer, max_length, text_key)
+    train_ds = LMTextDataset(train_rows, tokenizer, max_length, text_key,
+                             loss_mode=loss_mode, prompt_key=prompt_key, response_key=response_key)
+    val_ds = LMTextDataset(val_rows, tokenizer, max_length, text_key,
+                           loss_mode=loss_mode, prompt_key=prompt_key, response_key=response_key)
 
     num_gpus = int(os.environ.get("WORLD_SIZE", torch.cuda.device_count()))
     total_steps = estimate_total_steps(
@@ -242,6 +247,12 @@ def main() -> None:
     parser.add_argument("--val_jsonl", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--text_key", default="text")
+    parser.add_argument("--loss_mode", default="full", choices=["full", "response_only"],
+                        help="Loss mode: 'full' (all tokens) or 'response_only' (mask prompt)")
+    parser.add_argument("--prompt_key", default="prompt",
+                        help="Key for prompt text (only used with loss_mode=response_only)")
+    parser.add_argument("--response_key", default="response",
+                        help="Key for response text (only used with loss_mode=response_only)")
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_train_epochs", type=float, default=1.0)

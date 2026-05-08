@@ -140,10 +140,12 @@ def move_batch_to_device(batch: dict[str, Any], device: torch.device) -> dict[st
 
 
 class LMTextDataset(Dataset):
-    """Simple LM dataset for CPT training.
+    """LM dataset for training.
 
-    Optionally tags each sample with a group label (e.g. "target" vs
-    "replay") so the training loop can compute per-group losses.
+    Supports two modes:
+      - 'full': all tokens contribute to loss (CPT mode)
+      - 'response_only': only tokens after the prompt contribute to loss (SFT mode)
+        Requires 'prompt' and 'response' keys in each row.
     """
 
     def __init__(
@@ -152,28 +154,65 @@ class LMTextDataset(Dataset):
         tokenizer: Any,
         max_length: int = 512,
         text_key: str = "text",
+        loss_mode: str = "full",
+        prompt_key: str = "prompt",
+        response_key: str = "response",
         group_labels: list[str] | None = None,
     ):
+        if loss_mode not in ("full", "response_only"):
+            raise ValueError(f"loss_mode must be 'full' or 'response_only', got '{loss_mode}'")
+
         self.examples: list[dict[str, torch.Tensor]] = []
         self.group_labels: list[str] = []
 
         for i, row in enumerate(rows):
-            if text_key not in row:
-                raise ValueError(f"Missing '{text_key}' in row {i}")
-            text = str(row[text_key]).strip()
-            if not text:
-                continue
-            enc = tokenizer(
-                text,
-                truncation=True,
-                max_length=max_length,
-                padding=False,
-                return_tensors="pt",
-            )
-            input_ids = enc["input_ids"].squeeze(0)
-            attention_mask = enc["attention_mask"].squeeze(0)
-            labels = input_ids.clone()
-            labels[attention_mask == 0] = IGNORE_INDEX
+            if loss_mode == "full":
+                if text_key not in row:
+                    raise ValueError(f"Missing '{text_key}' in row {i}")
+                text = str(row[text_key]).strip()
+                if not text:
+                    continue
+                enc = tokenizer(
+                    text,
+                    truncation=True,
+                    max_length=max_length,
+                    padding=False,
+                    return_tensors="pt",
+                )
+                input_ids = enc["input_ids"].squeeze(0)
+                attention_mask = enc["attention_mask"].squeeze(0)
+                labels = input_ids.clone()
+                labels[attention_mask == 0] = IGNORE_INDEX
+            else:
+                if prompt_key not in row or response_key not in row:
+                    raise ValueError(f"Missing '{prompt_key}' or '{response_key}' in row {i}")
+                prompt = str(row[prompt_key])
+                response = str(row[response_key])
+
+                prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
+                response_ids = tokenizer.encode(response, add_special_tokens=False)
+                if tokenizer.eos_token_id is not None:
+                    response_ids = response_ids + [tokenizer.eos_token_id]
+
+                all_ids = prompt_ids + response_ids
+                all_labels = [IGNORE_INDEX] * len(prompt_ids) + response_ids[:]
+
+                if len(all_ids) > max_length:
+                    all_ids = all_ids[:max_length]
+                    all_labels = all_labels[:max_length]
+
+                attention_mask = [1] * len(all_ids)
+                pad_len = max_length - len(all_ids)
+                if pad_len > 0:
+                    pad_id = tokenizer.pad_token_id or 0
+                    all_ids = all_ids + [pad_id] * pad_len
+                    all_labels = all_labels + [IGNORE_INDEX] * pad_len
+                    attention_mask = attention_mask + [0] * pad_len
+
+                input_ids = torch.tensor(all_ids, dtype=torch.long)
+                attention_mask = torch.tensor(attention_mask, dtype=torch.long)
+                labels = torch.tensor(all_labels, dtype=torch.long)
+
             self.examples.append(
                 {
                     "input_ids": input_ids,

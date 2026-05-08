@@ -100,6 +100,13 @@ def main() -> None:
     p_train.add_argument("--train_jsonl", required=True)
     p_train.add_argument("--val_jsonl", required=True)
     p_train.add_argument("--output_dir", required=True)
+    p_train.add_argument("--text_key", default="text")
+    p_train.add_argument("--loss_mode", default="full", choices=["full", "response_only"],
+                         help="Loss mode: 'full' (all tokens) or 'response_only' (mask prompt)")
+    p_train.add_argument("--prompt_key", default="prompt",
+                         help="Prompt key for response_only mode")
+    p_train.add_argument("--response_key", default="response",
+                         help="Response key for response_only mode")
     p_train.add_argument("--num_train_epochs", type=float, default=1.0)
     p_train.add_argument("--learning_rate", type=float, default=2e-5)
     p_train.add_argument("--per_device_train_batch_size", type=int, default=8)
@@ -530,6 +537,10 @@ def main() -> None:
             train_jsonl=args.train_jsonl,
             val_jsonl=args.val_jsonl,
             output_dir=args.output_dir,
+            text_key=args.text_key,
+            loss_mode=args.loss_mode,
+            prompt_key=args.prompt_key,
+            response_key=args.response_key,
             num_train_epochs=args.num_train_epochs,
             learning_rate=args.learning_rate,
             per_device_train_batch_size=args.per_device_train_batch_size,
