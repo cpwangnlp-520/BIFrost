@@ -10,99 +10,39 @@
 #   3. pip install -e .
 #
 # Usage:
-#   python -m bif.cli pipeline run --config configs/best_70m.yaml
-#
-# Resume:
-#   python -m bif.cli pipeline run --config configs/best_70m.yaml --resume
+#   python -m bif.cli run-bif --config configs/best_70m.yaml
+#   python -m bif.cli analyze-bif --config configs/best_70m.yaml
 
-# >>> SET THESE TO YOUR LOCAL PATHS <<<
-tokenizer_path: /path/to/pythia-70m
-base_model_path: /path/to/pythia-70m
+# >>> SET THIS TO YOUR LOCAL MODEL PATH <<<
+model_name_or_path: /path/to/pythia-70m
 
-work_dir: ./runs/best_70m
+pool_jsonl: data/pool_800.jsonl
+query_jsonl: data/query_gsm8k_20_answer_only.jsonl
+out_dir: ./runs/best_70m
 
 # experiment_name: my-custom-name   # uncomment to override auto-naming
 # project_name: BIFrost             # default: BIFrost
 
-steps:
+# ─── run-bif ───
+sampler_type: rmsprop_sgld
+max_length: 512
+num_chains: 3
+draws_per_chain: 500
+num_burnin_steps: 100
+num_steps_bw_draws: 2
+lr: 1e-6
+gamma: 100
+beta: 0.125
+nbeta: 10
+nbeta_mode: devinterp
+rmsprop_eps: 1e-4
+noise_scale: 1.0
+train_batch_size: 32
+eval_batch_size: 256
+batches_per_draw: 3
+gradient_accumulation_steps: 1
+dtype: bfloat16
 
-  build-pool:
-    pool_jsonl: data/pool_800.jsonl
-    finetune_pool_jsonl: data/pool_gsm8k_20.jsonl
-
-  prepare-finetune:
-    train_ratio: 0.5
-    query_ratio: 0.2
-    val_ratio: 0.15
-    test_ratio: 0.15
-    min_chars: 10
-    min_token_count: 10
-    max_token_count: 4096
-    min_int_score: 0
-    min_language_score: 0.0
-
-  train:
-    num_train_epochs: 1
-    learning_rate: 2e-4
-    per_device_train_batch_size: 8
-    per_device_eval_batch_size: 8
-    gradient_accumulation_steps: 1
-    max_length: 256
-    target_num_checkpoints: 3
-    warmup_ratio: 0.03
-    logging_steps: 5
-    bf16: true
-    gradient_checkpointing: true
-
-  run-bif:
-    sampler_type: rmsprop_sgld
-    max_length: 512
-    num_chains: 3
-    draws_per_chain: 500
-    num_burnin_steps: 100
-    num_steps_bw_draws: 2
-    lr: 1e-6
-    gamma: 100
-    beta: 0.125
-    nbeta: 10
-    nbeta_mode: devinterp
-    rmsprop_eps: 1e-4
-    noise_scale: 1.0
-    train_batch_size: 32
-    eval_batch_size: 256
-    batches_per_draw: 3
-    gradient_accumulation_steps: 1
-    dtype: bfloat16
-
-  analyze-bif:
-    score_col: cross_cov_avg_over_queries
-    top_k: 150
-
-  extract-top:
-    top_k: 150
-    score_cols:
-      - cross_cov_avg_over_queries
-
-  schedule-compare:
-    schedules:
-      - sequential
-      - mixed
-    replay_modes:
-      - selected
-      - random
-      - none
-    mix_ratios:
-      - 0.2
-    num_train_epochs: 1
-    learning_rate: 2e-4
-    per_device_train_batch_size: 8
-    per_device_eval_batch_size: 8
-    gradient_accumulation_steps: 1
-    max_length: 256
-    logging_steps: 5
-    eval_steps: 10
-    bf16: true
-    gradient_checkpointing: true
-    seed: 42
-
-  schedule-analyze: {}
+# ─── analyze-bif ───
+score_col: cross_cov_avg_over_queries
+top_k: 150
