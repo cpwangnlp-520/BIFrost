@@ -240,6 +240,8 @@ def log_bar(
     if not _is_initialised():
         return
     try:
+        from pyecharts.options.series_options import LabelOpts
+
         chart = swanlab.echarts.Bar()
         chart.add_xaxis(xaxis)
         for name, values in series.items():
