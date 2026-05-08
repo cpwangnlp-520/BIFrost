@@ -172,6 +172,11 @@ def main() -> None:
 
     # --- analysis ---
     p_run = sub.add_parser("run-bif", help="Run BIF trace collection")
+    p_run.add_argument(
+        "--config",
+        default=None,
+        help="YAML config file (overrides all other CLI args)",
+    )
     p_run.add_argument("--model_name_or_path", default=None)
     p_run.add_argument("--model_root", default=None)
     p_run.add_argument("--base_model_path", default=None)
@@ -188,9 +193,9 @@ def main() -> None:
         action="store_true",
         help="Skip checkpoints whose output directory already has complete traces.",
     )
-    p_run.add_argument("--pool_jsonl", required=True)
-    p_run.add_argument("--query_jsonl", required=True)
-    p_run.add_argument("--out_dir", required=True)
+    p_run.add_argument("--pool_jsonl", default=None)
+    p_run.add_argument("--query_jsonl", default=None)
+    p_run.add_argument("--out_dir", default=None)
     p_run.add_argument("--num_chains", type=int, default=4)
     p_run.add_argument("--draws_per_chain", type=int, default=60)
     p_run.add_argument("--max_length", type=int, default=256)
@@ -252,8 +257,13 @@ def main() -> None:
     )
 
     p_analyze = sub.add_parser("analyze-bif", help="Analyze BIF results")
-    p_analyze.add_argument("--bif_root", required=True)
-    p_analyze.add_argument("--out_dir", required=True)
+    p_analyze.add_argument(
+        "--config",
+        default=None,
+        help="YAML config file (overrides all other CLI args)",
+    )
+    p_analyze.add_argument("--bif_root", default=None)
+    p_analyze.add_argument("--out_dir", default=None)
     p_analyze.add_argument("--score_col", default="bif_mean")
     p_analyze.add_argument("--top_k", type=int, default=500)
     p_analyze.add_argument(
@@ -364,6 +374,30 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    def _load_yaml(path):
+        import yaml
+        with open(path) as f:
+            return yaml.safe_load(f)
+
+    def _apply_config(args, section=None):
+        if not getattr(args, "config", None):
+            return
+        cfg = _load_yaml(args.config)
+        if section and section in cfg:
+            cfg = cfg[section]
+        for k, v in cfg.items():
+            k_cli = k.replace("-", "_")
+            setattr(args, k_cli, v)
+
+    if args.command == "run-bif":
+        _apply_config(args)
+        if not args.pool_jsonl or not args.query_jsonl or not args.out_dir:
+            parser.error("run-bif requires --pool_jsonl, --query_jsonl, --out_dir (or --config)")
+    elif args.command == "analyze-bif":
+        _apply_config(args)
+        if not args.bif_root:
+            parser.error("analyze-bif requires --bif_root or --config")
 
     if args.command == "build-pool-v2":
         from bif.data.build_pool import (
@@ -616,9 +650,17 @@ def main() -> None:
     elif args.command == "analyze-bif":
         from bif.analysis.bif_analyzer import analyze_bif_results
 
+        if args.bif_root is None and args.config is None:
+            parser.error("analyze-bif requires --bif_root or --config")
+
+        bif_root = args.bif_root
+        out_dir = args.out_dir
+        if out_dir is None and bif_root is not None:
+            out_dir = f"{bif_root}/analysis"
+
         analyze_bif_results(
-            bif_root=args.bif_root,
-            out_dir=args.out_dir,
+            bif_root=bif_root,
+            out_dir=out_dir,
             score_col=args.score_col,
             top_k=args.top_k,
             experiment_name=args.experiment_name,

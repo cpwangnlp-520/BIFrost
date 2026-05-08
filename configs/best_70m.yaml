@@ -5,12 +5,15 @@
 # Quality: GOOD (loss trace levels off, high SNR, chains agree)
 #
 # Prerequisites:
-#   1. Set MODEL_PATH below to your local model path (e.g. Pythia-70M)
+#   1. Set model_name_or_path below to your local model path (e.g. Pythia-70M)
 #   2. export SWANLAB_API_KEY=<your_token>
 #   3. pip install -e .
 #
 # Usage:
+#   # Run BIF sampling:
 #   python -m bif.cli run-bif --config configs/best_70m.yaml
+#
+#   # Run BIF analysis (after sampling completes):
 #   python -m bif.cli analyze-bif --config configs/best_70m.yaml
 
 # >>> SET THIS TO YOUR LOCAL MODEL PATH <<<
@@ -23,7 +26,7 @@ out_dir: ./runs/best_70m
 # experiment_name: my-custom-name   # uncomment to override auto-naming
 # project_name: BIFrost             # default: BIFrost
 
-# ─── run-bif ───
+# ─── run-bif parameters ───
 sampler_type: rmsprop_sgld
 max_length: 512
 num_chains: 3
@@ -36,13 +39,14 @@ beta: 0.125
 nbeta: 10
 nbeta_mode: devinterp
 rmsprop_eps: 1e-4
-noise_scale: 1.0
+noise_level: 1.0
 train_batch_size: 32
 eval_batch_size: 256
 batches_per_draw: 3
 gradient_accumulation_steps: 1
 dtype: bfloat16
 
-# ─── analyze-bif ───
+# ─── analyze-bif parameters ───
+bif_root: ./runs/best_70m
 score_col: cross_cov_avg_over_queries
 top_k: 150
