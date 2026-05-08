@@ -109,7 +109,7 @@ def run_bif():
             f"  --out_dir {out_dir}"
             f"  --sampler_type rmsprop_sgld"
             f"  --num_chains 3 --draws_per_chain 500"
-            f"  --num_burnin_steps 100 --num_steps_bw_draws 2"
+            f"  --num_burnin_steps 100 --num_steps_bw_draws 1"
             f"  --train_batch_size 32 --eval_batch_size 256"
             f"  --batches_per_draw 3 --gradient_accumulation_steps 1"
             f"  --lr 1e-6 --gamma 100 --nbeta 10 --nbeta_mode devinterp"

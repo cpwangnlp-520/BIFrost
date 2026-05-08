@@ -994,7 +994,7 @@ def _log_corr_distribution(
 
     if df is not None and "source" in df.columns:
         sources = sorted(df["source"].fillna("unknown").unique().tolist())
-        if 2 <= len(sources) <= 20:
+        if len(sources) >= 2:
             pool_by_src = {}
             cross_by_src = {}
             for src in sources:
@@ -1141,7 +1141,7 @@ def _log_bif_heatmap_topk(
 
     if "source" in df.columns:
         sources = sorted(df["source"].fillna("unknown").unique().tolist())
-        if 2 <= len(sources) <= 30:
+        if len(sources) >= 2:
             source_score = {}
             for src in sources:
                 mask = (df["source"].fillna("unknown") == src).to_numpy()
@@ -1183,28 +1183,6 @@ def _log_score_by_source(
         return
 
     sources = sorted(df["source"].fillna("unknown").unique().tolist())
-    if len(sources) < 2 or len(sources) > 20:
-        return
-
-    box_data = []
-    labels = []
-    for src in sources:
-        vals = df[df["source"].fillna("unknown") == src][score_col].dropna().values
-        if len(vals) < 5:
-            continue
-        q1, median, q3 = np.percentile(vals, [25, 50, 75])
-        iqr = q3 - q1
-        lower = max(float(vals.min()), q1 - 1.5 * iqr)
-        upper = min(float(vals.max()), q3 + 1.5 * iqr)
-        box_data.append([round(lower, 6), round(q1, 6), round(median, 6), round(q3, 6), round(upper, 6)])
-        labels.append(str(src)[:20])
-
-    if len(box_data) >= 2:
-        log_boxplot(
-            f"3_influence/score_by_source/{ck_name}",
-            xaxis=labels,
-            series={score_col: box_data},
-        )
 
     topk_src_frac = df.head(top_k)["source"].fillna("unknown").value_counts(normalize=True)
     bottomk_src_frac = df.tail(top_k)["source"].fillna("unknown").value_counts(normalize=True)
@@ -1231,13 +1209,35 @@ def _log_score_by_source(
         },
         stack=False,
     )
-    enrichment_data = {}
-    for src in sources:
-        safe_src = src.replace(" ", "_").replace("/", "_")[:30]
-        t_frac = float(topk_src_frac.get(src, 0))
-        p_frac = float(pool_src_frac.get(src, 0))
-        enrichment_data[f"3_influence/enrichment/{safe_src}"] = (t_frac + 1e-9) / (p_frac + 1e-9)
-    swan_log(enrichment_data)
+
+    if len(sources) >= 2 and len(sources) <= 20:
+        box_data = []
+        labels = []
+        for src in sources:
+            vals = df[df["source"].fillna("unknown") == src][score_col].dropna().values
+            if len(vals) < 5:
+                continue
+            q1, median, q3 = np.percentile(vals, [25, 50, 75])
+            iqr = q3 - q1
+            lower = max(float(vals.min()), q1 - 1.5 * iqr)
+            upper = min(float(vals.max()), q3 + 1.5 * iqr)
+            box_data.append([round(lower, 6), round(q1, 6), round(median, 6), round(q3, 6), round(upper, 6)])
+            labels.append(str(src)[:20])
+
+        if len(box_data) >= 2:
+            log_boxplot(
+                f"3_influence/score_by_source/{ck_name}",
+                xaxis=labels,
+                series={score_col: box_data},
+            )
+
+        enrichment_data = {}
+        for src in sources:
+            safe_src = src.replace(" ", "_").replace("/", "_")[:30]
+            t_frac = float(topk_src_frac.get(src, 0))
+            p_frac = float(pool_src_frac.get(src, 0))
+            enrichment_data[f"3_influence/enrichment/{safe_src}"] = (t_frac + 1e-9) / (p_frac + 1e-9)
+        swan_log(enrichment_data)
 
 
 def _log_eigenvalue_spectrum(bif_mat: np.ndarray, ck_name: str) -> None:

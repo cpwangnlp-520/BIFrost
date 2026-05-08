@@ -586,21 +586,33 @@ def run_bif(
         total_steps = sgld_cfg.num_burnin_steps + sgld_cfg.draws_per_chain * sgld_cfg.num_steps_bw_draws
         draw_count = 0
         grad_accum = sgld_cfg.gradient_accumulation_steps
+        steps_since_draw = sgld_cfg.num_steps_bw_draws
 
-        model.eval()
         pbar = tqdm(range(total_steps), desc=f"Chain {chain_id}", disable=(rank != 0))
         for step in pbar:
             is_burnin = step < sgld_cfg.num_burnin_steps
+
+            if grad_accum > 1:
+                step_info = sampler.step_accumulated_dataloader(
+                    pool_ds, feed, grad_accum, device, step_generator=noise_gen,
+                )
+            else:
+                batch = move_batch_to_device(next(feed), device)
+                step_info = sampler.step(batch, step_generator=noise_gen)
+
+            steps_since_draw += 1
+
             is_draw_step = (
                 not is_burnin
-                and (step - sgld_cfg.num_burnin_steps) % sgld_cfg.num_steps_bw_draws == 0
+                and steps_since_draw >= sgld_cfg.num_steps_bw_draws
             )
             is_burnin_draw_step = (
                 is_burnin
-                and step % sgld_cfg.num_steps_bw_draws == 0
+                and steps_since_draw >= sgld_cfg.num_steps_bw_draws
             )
 
             if is_burnin_draw_step:
+                steps_since_draw = 0
                 model.eval()
                 pool_seq, pool_tok = pool_obs.compute_loss(model)
                 query_seq, query_tok = query_obs.compute_loss(model)
@@ -629,6 +641,7 @@ def run_bif(
                     )
 
             if is_draw_step:
+                steps_since_draw = 0
                 model.eval()
                 pool_seq, pool_tok = pool_obs.compute_loss(model)
                 query_seq, query_tok = query_obs.compute_loss(model)
@@ -654,8 +667,7 @@ def run_bif(
                 )
 
                 if rank == 0:
-                    global_draw = chain_id * sgld_cfg.draws_per_chain + (draw_count - 1)
-                    log_step = global_step_offset + sgld_cfg.num_burnin_steps + (draw_count - 1) * sgld_cfg.num_steps_bw_draws
+                    log_step = global_step_offset + step
                     with torch.no_grad():
                         param_dist_sq = sum(
                             (p.data - anchor_params[n]).float().norm().item() ** 2
@@ -676,14 +688,6 @@ def run_bif(
                         },
                         step=log_step,
                     )
-
-            if grad_accum > 1:
-                step_info = sampler.step_accumulated_dataloader(
-                    pool_ds, feed, grad_accum, device, step_generator=noise_gen,
-                )
-            else:
-                batch = move_batch_to_device(next(feed), device)
-                step_info = sampler.step(batch, step_generator=noise_gen)
 
             if rank == 0:
                 log_step = global_step_offset + step

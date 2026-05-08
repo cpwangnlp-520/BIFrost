@@ -32,7 +32,7 @@ max_length: 512
 num_chains: 3
 draws_per_chain: 500
 num_burnin_steps: 100
-num_steps_bw_draws: 2
+num_steps_bw_draws: 1
 lr: 1e-6
 gamma: 100
 beta: 0.125
@@ -48,5 +48,6 @@ dtype: bfloat16
 
 # ─── analyze-bif parameters ───
 bif_root: ./runs/best_70m
+out_dir: ./runs/best_70m/analysis
 score_col: cross_cov_avg_over_queries
 top_k: 150
