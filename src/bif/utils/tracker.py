@@ -247,6 +247,7 @@ def log_bar(
                 name,
                 [round(float(v), 4) if v is not None else None for v in values],
                 stack="stack0" if stack else None,
+                label_opts=LabelOpts(is_show=False),
             )
         swanlab.log({key: chart})
     except Exception:

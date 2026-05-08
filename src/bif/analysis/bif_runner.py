@@ -595,11 +595,51 @@ def run_bif(
                 not is_burnin
                 and (step - sgld_cfg.num_burnin_steps) % sgld_cfg.num_steps_bw_draws == 0
             )
+            is_burnin_draw_step = (
+                is_burnin
+                and step % sgld_cfg.num_steps_bw_draws == 0
+            )
+
+            if is_burnin_draw_step:
+                model.eval()
+                pool_seq, pool_tok = pool_obs.compute_loss(model)
+                query_seq, query_tok = query_obs.compute_loss(model)
+
+                if torch.isnan(pool_seq).any() or torch.isnan(query_seq).any():
+                    logger.warning(
+                        "NaN detected at burn-in step %d (chain %d). "
+                        "SGLD diverged — stopping this chain early.",
+                        step, chain_id if single_chain_mode else rank,
+                    )
+                    break
+
+                if rank == 0:
+                    swan_log(
+                        {
+                            "4_1_bif/pool_loss_mean": float(pool_seq.mean()),
+                            "4_1_bif/pool_loss_std": float(pool_seq.std()),
+                            "4_1_bif/query_loss_mean": float(query_seq.mean()),
+                            "4_1_bif/query_loss_std": float(query_seq.std()),
+                            "4_1_bif/pool_query_loss_gap": float(
+                                pool_seq.mean() - query_seq.mean()
+                            ),
+                            "4_1_bif/is_burnin": 1,
+                        },
+                        step=global_step_offset + step,
+                    )
 
             if is_draw_step:
                 model.eval()
                 pool_seq, pool_tok = pool_obs.compute_loss(model)
                 query_seq, query_tok = query_obs.compute_loss(model)
+
+                if torch.isnan(pool_seq).any() or torch.isnan(query_seq).any():
+                    logger.warning(
+                        "NaN detected at step %d (chain %d). "
+                        "SGLD diverged — stopping this chain early.",
+                        step, chain_id if single_chain_mode else rank,
+                    )
+                    break
 
                 pool_seq_losses.append(pool_seq)
                 pool_token_losses.append(pool_tok)
@@ -615,7 +655,7 @@ def run_bif(
 
                 if rank == 0:
                     global_draw = chain_id * sgld_cfg.draws_per_chain + (draw_count - 1)
-                    log_step = global_step_offset + global_draw
+                    log_step = global_step_offset + sgld_cfg.num_burnin_steps + (draw_count - 1) * sgld_cfg.num_steps_bw_draws
                     with torch.no_grad():
                         param_dist_sq = sum(
                             (p.data - anchor_params[n]).float().norm().item() ** 2
@@ -632,6 +672,7 @@ def run_bif(
                                 pool_seq.mean() - query_seq.mean()
                             ),
                             "4_1_bif/param_dist_from_anchor": param_dist,
+                            "4_1_bif/is_burnin": 0,
                         },
                         step=log_step,
                     )
@@ -644,9 +685,8 @@ def run_bif(
                 batch = move_batch_to_device(next(feed), device)
                 step_info = sampler.step(batch, step_generator=noise_gen)
 
-            if not is_burnin and rank == 0:
-                step_after_burnin = step - sgld_cfg.num_burnin_steps
-                log_step = global_step_offset + chain_id * sgld_cfg.draws_per_chain * sgld_cfg.num_steps_bw_draws + step_after_burnin
+            if rank == 0:
+                log_step = global_step_offset + step
                 swan_log(
                     {
                         "4_1_bif/sgld_step_loss": step_info["loss"],

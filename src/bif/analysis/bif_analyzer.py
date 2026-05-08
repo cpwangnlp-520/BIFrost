@@ -151,6 +151,14 @@ def _load_traces_npz(chain_dirs: list[str]) -> dict[str, Any]:
     query_seq = np.concatenate(query_seq_parts, axis=0)
     query_token = np.concatenate(query_token_parts, axis=0)
 
+    pool_nan_frac = float(np.isnan(pool_seq).mean())
+    query_nan_frac = float(np.isnan(query_seq).mean())
+    if pool_nan_frac > 0.5 or query_nan_frac > 0.5:
+        raise ValueError(
+            f"Trace data is mostly NaN (pool={pool_nan_frac:.1%}, query={query_nan_frac:.1%}). "
+            f"SGLD likely diverged — decrease lr and/or increase gamma."
+        )
+
     num_chains = len(chain_dirs)
     draws_per_chain = pool_seq.shape[0] // num_chains
 
@@ -797,6 +805,18 @@ def _process_one_checkpoint(
         print(f"[analyze] Skipping {ck_name}: {exc}")
         return {"checkpoint": ck_name, "error": str(exc)}
 
+    pool_seq = loaded["pool_seq_loss"]
+    query_seq = loaded["query_seq_loss"]
+    if np.isnan(pool_seq).any() or np.isnan(query_seq).any():
+        pool_nan = float(np.isnan(pool_seq).mean())
+        query_nan = float(np.isnan(query_seq).mean())
+        msg = (
+            f"Trace contains NaN (pool={pool_nan:.1%}, query={query_nan:.1%}). "
+            f"SGLD diverged — skipping analysis."
+        )
+        print(f"[analyze] Skipping {ck_name}: {msg}")
+        return {"checkpoint": ck_name, "error": msg}
+
     num_chains = loaded.get("num_chains", 1)
     scores = compute_bif_scores(
         loaded["pool_seq_loss"],
@@ -846,6 +866,7 @@ def _process_one_checkpoint(
         _log_loss_traces(pool_mat, query_mat, num_chains, ck_name)
         _log_score_summary(scores_arr, loaded["num_draws"], ck_step)
         _log_score_histogram(scores_arr, ck_name)
+        _log_corr_distribution(bif_mat, scores["cross_corr_matrix"], ck_name, df=df)
         _log_score_vs_selfvar_scatter(
             scores_arr, scores["cross_cov_avg_over_queries"],
             pool_mat, query_mat, ck_name,
@@ -944,6 +965,60 @@ def _log_score_summary(
 def _log_score_histogram(scores_arr: np.ndarray, ck_name: str) -> None:
     labels, counts = _score_histogram_bars(scores_arr, bins=40)
     log_bar(f"2_scores/distribution/{ck_name}", xaxis=labels, series={"count": counts})
+
+
+def _log_corr_distribution(
+    bif_matrix: np.ndarray,
+    cross_corr_matrix: np.ndarray,
+    ck_name: str,
+    df: pd.DataFrame | None = None,
+) -> None:
+    n_pool = bif_matrix.shape[0]
+    triu_idx = np.triu_indices(n_pool, k=1)
+    pool_corr_vals = bif_matrix[triu_idx]
+    cross_corr_avg = cross_corr_matrix.mean(axis=1)
+
+    pool_labels, pool_counts = _score_histogram_bars(pool_corr_vals, bins=40)
+    log_bar(
+        f"3_influence/pool_corr_distribution/{ck_name}",
+        xaxis=pool_labels,
+        series={"count": pool_counts},
+    )
+
+    cross_labels, cross_counts = _score_histogram_bars(cross_corr_avg, bins=40)
+    log_bar(
+        f"3_influence/cross_corr_distribution/{ck_name}",
+        xaxis=cross_labels,
+        series={"count": cross_counts},
+    )
+
+    if df is not None and "source" in df.columns:
+        sources = sorted(df["source"].fillna("unknown").unique().tolist())
+        if 2 <= len(sources) <= 20:
+            pool_by_src = {}
+            cross_by_src = {}
+            for src in sources:
+                idx = df.index[df["source"].fillna("unknown") == src].tolist()
+                if len(idx) < 2:
+                    continue
+                safe_src = str(src)[:30]
+                sub_mat = bif_matrix[np.ix_(idx, idx)]
+                sub_triu = np.triu_indices(len(idx), k=1)
+                pool_by_src[safe_src] = sub_mat[sub_triu].tolist()
+                cross_by_src[safe_src] = cross_corr_avg[idx].tolist()
+
+            if pool_by_src:
+                log_bar(
+                    f"3_influence/pool_corr_by_source/{ck_name}",
+                    xaxis=pool_labels,
+                    series={s: _score_histogram_bars(np.array(v), bins=40)[1] for s, v in pool_by_src.items() if v},
+                )
+            if cross_by_src:
+                log_bar(
+                    f"3_influence/cross_corr_by_source/{ck_name}",
+                    xaxis=cross_labels,
+                    series={s: _score_histogram_bars(np.array(v), bins=40)[1] for s, v in cross_by_src.items()},
+                )
 
 
 def _log_score_vs_selfvar_scatter(
@@ -1132,7 +1207,30 @@ def _log_score_by_source(
         )
 
     topk_src_frac = df.head(top_k)["source"].fillna("unknown").value_counts(normalize=True)
+    bottomk_src_frac = df.tail(top_k)["source"].fillna("unknown").value_counts(normalize=True)
     pool_src_frac = df["source"].fillna("unknown").value_counts(normalize=True)
+    all_sources_sorted = sorted(pool_src_frac.index.tolist())
+
+    log_bar(
+        f"3_influence/source_distribution_top{top_k}/{ck_name}",
+        xaxis=[str(s)[:20] for s in all_sources_sorted],
+        series={"top_k": [round(float(topk_src_frac.get(s, 0.0)), 4) for s in all_sources_sorted]},
+    )
+    log_bar(
+        f"3_influence/source_distribution_bottom{top_k}/{ck_name}",
+        xaxis=[str(s)[:20] for s in all_sources_sorted],
+        series={"bottom_k": [round(float(bottomk_src_frac.get(s, 0.0)), 4) for s in all_sources_sorted]},
+    )
+    log_bar(
+        f"3_influence/source_distribution_compare_top{top_k}_vs_bottom{top_k}/{ck_name}",
+        xaxis=[str(s)[:20] for s in all_sources_sorted],
+        series={
+            "top_k": [round(float(topk_src_frac.get(s, 0.0)), 4) for s in all_sources_sorted],
+            "bottom_k": [round(float(bottomk_src_frac.get(s, 0.0)), 4) for s in all_sources_sorted],
+            "pool": [round(float(pool_src_frac.get(s, 0.0)), 4) for s in all_sources_sorted],
+        },
+        stack=False,
+    )
     enrichment_data = {}
     for src in sources:
         safe_src = src.replace(" ", "_").replace("/", "_")[:30]
