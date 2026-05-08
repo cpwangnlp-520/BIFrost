@@ -1,0 +1,73 @@
+#!/bin/bash
+# GPU 5: 15 configs
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd $ROOT
+export CUDA_VISIBLE_DEVICES=5
+export SWANLAB_API_KEY=RGvhmcyaE940jILdlzCGg
+export SWANLAB_PROJECT=BIFrost-eps-sweep
+
+echo "SKIP (done): phase1/lr1e-6_g10_nb100_eps1e-4"
+echo "SKIP (done): phase1/lr1e-5_g1_nb10_eps1e-4"
+echo "SKIP (NaN): phase1/lr1e-5_g1000_nb1_eps1e-4"
+echo "\n=== GPU 5: phase1/lr1e-4_g10_nb100_eps1e-4 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase1/lr1e-4_g10_nb100_eps1e-4)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase1/lr1e-4_g10_nb100_eps1e-4  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 0.0001  --gamma 10  --nbeta 100  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 0.0001  --dtype bfloat16  --max_length 512  --experiment_name sweep-p1-lr1e-4_g10_nb100_eps1e-4 || echo '[WARN] run-bif FAILED for phase1/lr1e-4_g10_nb100_eps1e-4'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase1/lr1e-4_g10_nb100_eps1e-4  --out_dir ./runs/eps_sweep/phase1/lr1e-4_g10_nb100_eps1e-4/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p1-lr1e-4_g10_nb100_eps1e-4 || echo '[WARN] analyze-bif FAILED for phase1/lr1e-4_g10_nb100_eps1e-4'
+
+echo "\n=== GPU 5: phase2/lr1e-6_g10_nb10_eps1e-3 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-6_g10_nb10_eps1e-3)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-6_g10_nb10_eps1e-3  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 1e-06  --gamma 10  --nbeta 10  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 0.001  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-6_g10_nb10_eps1e-3 || echo '[WARN] run-bif FAILED for phase2/lr1e-6_g10_nb10_eps1e-3'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-6_g10_nb10_eps1e-3  --out_dir ./runs/eps_sweep/phase2/lr1e-6_g10_nb10_eps1e-3/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-6_g10_nb10_eps1e-3 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-6_g10_nb10_eps1e-3'
+
+echo "\n=== GPU 5: phase2/lr1e-5_g10_nb1_eps1e-3 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-5_g10_nb1_eps1e-3)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-5_g10_nb1_eps1e-3  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 1e-05  --gamma 10  --nbeta 1  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 0.001  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-5_g10_nb1_eps1e-3 || echo '[WARN] run-bif FAILED for phase2/lr1e-5_g10_nb1_eps1e-3'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-5_g10_nb1_eps1e-3  --out_dir ./runs/eps_sweep/phase2/lr1e-5_g10_nb1_eps1e-3/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-5_g10_nb1_eps1e-3 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-5_g10_nb1_eps1e-3'
+
+echo "\n=== GPU 5: phase2/lr1e-5_g1000_nb100_eps1e-3 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-5_g1000_nb100_eps1e-3)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-5_g1000_nb100_eps1e-3  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 1e-05  --gamma 1000  --nbeta 100  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 0.001  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-5_g1000_nb100_eps1e-3 || echo '[WARN] run-bif FAILED for phase2/lr1e-5_g1000_nb100_eps1e-3'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-5_g1000_nb100_eps1e-3  --out_dir ./runs/eps_sweep/phase2/lr1e-5_g1000_nb100_eps1e-3/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-5_g1000_nb100_eps1e-3 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-5_g1000_nb100_eps1e-3'
+
+echo "\n=== GPU 5: phase2/lr1e-4_g1000_nb10_eps1e-3 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-4_g1000_nb10_eps1e-3)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-4_g1000_nb10_eps1e-3  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 0.0001  --gamma 1000  --nbeta 10  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 0.001  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-4_g1000_nb10_eps1e-3 || echo '[WARN] run-bif FAILED for phase2/lr1e-4_g1000_nb10_eps1e-3'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-4_g1000_nb10_eps1e-3  --out_dir ./runs/eps_sweep/phase2/lr1e-4_g1000_nb10_eps1e-3/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-4_g1000_nb10_eps1e-3 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-4_g1000_nb10_eps1e-3'
+
+echo "\n=== GPU 5: phase2/lr1e-6_g1000_nb1_eps1e-4 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-6_g1000_nb1_eps1e-4)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-6_g1000_nb1_eps1e-4  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 1e-06  --gamma 1000  --nbeta 1  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 0.0001  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-6_g1000_nb1_eps1e-4 || echo '[WARN] run-bif FAILED for phase2/lr1e-6_g1000_nb1_eps1e-4'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-6_g1000_nb1_eps1e-4  --out_dir ./runs/eps_sweep/phase2/lr1e-6_g1000_nb1_eps1e-4/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-6_g1000_nb1_eps1e-4 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-6_g1000_nb1_eps1e-4'
+
+echo "\n=== GPU 5: phase2/lr1e-5_g100_nb100_eps1e-4 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-5_g100_nb100_eps1e-4)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-5_g100_nb100_eps1e-4  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 1e-05  --gamma 100  --nbeta 100  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 0.0001  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-5_g100_nb100_eps1e-4 || echo '[WARN] run-bif FAILED for phase2/lr1e-5_g100_nb100_eps1e-4'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-5_g100_nb100_eps1e-4  --out_dir ./runs/eps_sweep/phase2/lr1e-5_g100_nb100_eps1e-4/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-5_g100_nb100_eps1e-4 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-5_g100_nb100_eps1e-4'
+
+echo "\n=== GPU 5: phase2/lr1e-4_g100_nb10_eps1e-4 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-4_g100_nb10_eps1e-4)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-4_g100_nb10_eps1e-4  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 0.0001  --gamma 100  --nbeta 10  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 0.0001  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-4_g100_nb10_eps1e-4 || echo '[WARN] run-bif FAILED for phase2/lr1e-4_g100_nb10_eps1e-4'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-4_g100_nb10_eps1e-4  --out_dir ./runs/eps_sweep/phase2/lr1e-4_g100_nb10_eps1e-4/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-4_g100_nb10_eps1e-4 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-4_g100_nb10_eps1e-4'
+
+echo "\n=== GPU 5: phase2/lr1e-6_g100_nb1_eps1e-5 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-6_g100_nb1_eps1e-5)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-6_g100_nb1_eps1e-5  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 1e-06  --gamma 100  --nbeta 1  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 1e-05  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-6_g100_nb1_eps1e-5 || echo '[WARN] run-bif FAILED for phase2/lr1e-6_g100_nb1_eps1e-5'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-6_g100_nb1_eps1e-5  --out_dir ./runs/eps_sweep/phase2/lr1e-6_g100_nb1_eps1e-5/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-6_g100_nb1_eps1e-5 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-6_g100_nb1_eps1e-5'
+
+echo "\n=== GPU 5: phase2/lr1e-5_g10_nb100_eps1e-5 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-5_g10_nb100_eps1e-5)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-5_g10_nb100_eps1e-5  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 1e-05  --gamma 10  --nbeta 100  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 1e-05  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-5_g10_nb100_eps1e-5 || echo '[WARN] run-bif FAILED for phase2/lr1e-5_g10_nb100_eps1e-5'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-5_g10_nb100_eps1e-5  --out_dir ./runs/eps_sweep/phase2/lr1e-5_g10_nb100_eps1e-5/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-5_g10_nb100_eps1e-5 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-5_g10_nb100_eps1e-5'
+
+echo "\n=== GPU 5: phase2/lr1e-4_g10_nb10_eps1e-5 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase2/lr1e-4_g10_nb10_eps1e-5)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase2/lr1e-4_g10_nb10_eps1e-5  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 0.0001  --gamma 10  --nbeta 10  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 1e-05  --dtype bfloat16  --max_length 512  --experiment_name sweep-p2-lr1e-4_g10_nb10_eps1e-5 || echo '[WARN] run-bif FAILED for phase2/lr1e-4_g10_nb10_eps1e-5'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase2/lr1e-4_g10_nb10_eps1e-5  --out_dir ./runs/eps_sweep/phase2/lr1e-4_g10_nb10_eps1e-5/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p2-lr1e-4_g10_nb10_eps1e-5 || echo '[WARN] analyze-bif FAILED for phase2/lr1e-4_g10_nb10_eps1e-5'
+
+echo "\n=== GPU 5: phase3/lr1e-5_g10_nb0.0_eps1e-4 ==="
+mkdir -p $(dirname ./runs/eps_sweep/phase3/lr1e-5_g10_nb0.0_eps1e-4)
+python -m bif.cli run-bif  --model_name_or_path /workspace/pku_percy/models/pythia-70m-step1000  --pool_jsonl data/pool_800.jsonl  --query_jsonl data/query_gsm8k_20_answer_only.jsonl  --out_dir ./runs/eps_sweep/phase3/lr1e-5_g10_nb0.0_eps1e-4  --sampler_type rmsprop_sgld  --num_chains 3  --draws_per_chain 500  --num_burnin_steps 100  --num_steps_bw_draws 2  --train_batch_size 32  --eval_batch_size 256  --batches_per_draw 3  --gradient_accumulation_steps 1  --lr 1e-05  --gamma 10  --nbeta 0.0001  --nbeta_mode devinterp  --beta 0.125  --rmsprop_eps 0.0001  --dtype bfloat16  --max_length 512  --experiment_name sweep-p3-lr1e-5_g10_nb0.0_eps1e-4 || echo '[WARN] run-bif FAILED for phase3/lr1e-5_g10_nb0.0_eps1e-4'
+python -m bif.cli analyze-bif  --bif_root ./runs/eps_sweep/phase3/lr1e-5_g10_nb0.0_eps1e-4  --out_dir ./runs/eps_sweep/phase3/lr1e-5_g10_nb0.0_eps1e-4/analysis  --score_col cross_cov_avg_over_queries  --top_k 20  --experiment_name analyze-sweep-p3-lr1e-5_g10_nb0.0_eps1e-4 || echo '[WARN] analyze-bif FAILED for phase3/lr1e-5_g10_nb0.0_eps1e-4'
+
+echo "\n=== GPU 5: all done ==="

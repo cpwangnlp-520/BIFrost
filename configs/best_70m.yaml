@@ -1,8 +1,9 @@
 # BIFrost — Best Config: Pythia-70M RMSprop-SGLD
 # Hyperparameters tuned via sweep (project BIFrost-burnin-trace)
 #
-# Best config: lr=1e-6, gamma=100, nbeta=10, eps=1e-4
+# Best config: lr=1e-6, gamma=100, nbeta=10, rmsprop_eps=0.1
 # Quality: GOOD (loss trace levels off, high SNR, chains agree)
+# Note: rmsprop_eps=0.1 is the devinterp default (guide recommends eps=0.1)
 #
 # Prerequisites:
 #   1. Set model_name_or_path below to your local model path (e.g. Pythia-70M)
@@ -38,7 +39,7 @@ gamma: 100
 beta: 0.125
 nbeta: 10
 nbeta_mode: devinterp
-rmsprop_eps: 1e-4
+rmsprop_eps: 0.1
 noise_level: 1.0
 train_batch_size: 32
 eval_batch_size: 256

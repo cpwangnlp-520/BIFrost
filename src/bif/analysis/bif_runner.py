@@ -396,7 +396,6 @@ def run_bif(
     experiment_name: str | None = None,
     run_name: str | None = None,
     manage_tracking: bool = True,
-    global_step_offset: int = 0,
     chain_id: int | None = None,
     model_tag: str | None = None,
 ) -> None:
@@ -628,16 +627,11 @@ def run_bif(
                 if rank == 0:
                     swan_log(
                         {
-                            "4_1_bif/pool_loss_mean": float(pool_seq.mean()),
-                            "4_1_bif/pool_loss_std": float(pool_seq.std()),
-                            "4_1_bif/query_loss_mean": float(query_seq.mean()),
-                            "4_1_bif/query_loss_std": float(query_seq.std()),
-                            "4_1_bif/pool_query_loss_gap": float(
-                                pool_seq.mean() - query_seq.mean()
-                            ),
-                            "4_1_bif/is_burnin": 1,
+                            f"4_1_bif/chain{chain_id}/pool_loss_mean": float(pool_seq.mean()),
+                            f"4_1_bif/chain{chain_id}/query_loss_mean": float(query_seq.mean()),
+                            f"4_1_bif/chain{chain_id}/is_burnin": 1,
                         },
-                        step=global_step_offset + step,
+                        step=step,
                     )
 
             if is_draw_step:
@@ -667,7 +661,6 @@ def run_bif(
                 )
 
                 if rank == 0:
-                    log_step = global_step_offset + step
                     with torch.no_grad():
                         param_dist_sq = sum(
                             (p.data - anchor_params[n]).float().norm().item() ** 2
@@ -676,29 +669,23 @@ def run_bif(
                         param_dist = param_dist_sq ** 0.5
                     swan_log(
                         {
-                            "4_1_bif/pool_loss_mean": float(pool_seq.mean()),
-                            "4_1_bif/pool_loss_std": float(pool_seq.std()),
-                            "4_1_bif/query_loss_mean": float(query_seq.mean()),
-                            "4_1_bif/query_loss_std": float(query_seq.std()),
-                            "4_1_bif/pool_query_loss_gap": float(
-                                pool_seq.mean() - query_seq.mean()
-                            ),
-                            "4_1_bif/param_dist_from_anchor": param_dist,
-                            "4_1_bif/is_burnin": 0,
+                            f"4_1_bif/chain{chain_id}/pool_loss_mean": float(pool_seq.mean()),
+                            f"4_1_bif/chain{chain_id}/query_loss_mean": float(query_seq.mean()),
+                            f"4_1_bif/chain{chain_id}/param_dist_from_anchor": param_dist,
+                            f"4_1_bif/chain{chain_id}/is_burnin": 0,
                         },
-                        step=log_step,
+                        step=step,
                     )
 
             if rank == 0:
-                log_step = global_step_offset + step
                 swan_log(
                     {
-                        "4_1_bif/sgld_step_loss": step_info["loss"],
-                        "4_1_bif/sgld_grad_norm": step_info["grad_norm"],
-                        "4_1_bif/sgld_noise_norm": step_info["noise_norm"],
-                        "4_1_bif/sgld_signal_noise_ratio": step_info["grad_norm"] / (step_info["noise_norm"] + 1e-12),
+                        f"4_1_bif/chain{chain_id}/sgld_step_loss": step_info["loss"],
+                        f"4_1_bif/chain{chain_id}/sgld_grad_norm": step_info["grad_norm"],
+                        f"4_1_bif/chain{chain_id}/sgld_noise_norm": step_info["noise_norm"],
+                        f"4_1_bif/chain{chain_id}/sgld_signal_noise_ratio": step_info["grad_norm"] / (step_info["noise_norm"] + 1e-12),
                     },
-                    step=log_step,
+                    step=step,
                 )
 
         _save_traces_npz(chain_dir, chain_id, pool_seq_losses, pool_token_losses, pool_obs)
@@ -939,7 +926,6 @@ def main() -> None:
                     device=args.device,
                     dtype=args.dtype,
                     manage_tracking=False,
-                    global_step_offset=ckpt_idx * draws_per_ckpt,
                     chain_id=args.chain_id,
                 )
                 if torch.cuda.is_available():
