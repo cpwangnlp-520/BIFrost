@@ -21,3 +21,11 @@ test_data/
 *.log
 *.swp
 .DS_Store
+
+scripts/gpu_scripts/
+scripts/eps_gpu_scripts/
+scripts/hp_sweep.py
+scripts/eps_sweep.py
+scripts/reorganize_sweep.py
+scripts/run_hp_sweep.sh
+scripts/tmux_*.sh
