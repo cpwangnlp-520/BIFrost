@@ -22,6 +22,25 @@ _ENV_PROJECT = "SWANLAB_PROJECT"
 
 _DEFAULT_PROJECT = "BIFrost"
 
+_PALETTE = [
+    "#e74c3c", "#2ecc71", "#3498db", "#f39c12", "#9b59b6",
+    "#1abc9c", "#e67e22", "#2980b9", "#8e44ad", "#27ae60",
+    "#d35400", "#c0392b", "#16a085", "#2c3e50", "#f1c40f",
+    "#7f8c8d", "#d63384", "#0d6efd", "#198754", "#ffc107",
+]
+
+_chart_color_counter: int = 0
+_chart_color_map: dict[str, int] = {}
+
+
+def _key_base(key: str) -> int:
+    """Deterministic color index — each unique chart path gets the next color."""
+    global _chart_color_counter
+    if key not in _chart_color_map:
+        _chart_color_map[key] = _chart_color_counter
+        _chart_color_counter += 1
+    return _chart_color_map[key] % len(_PALETTE)
+
 
 def get_project() -> str:
     return os.environ.get(_ENV_PROJECT, _DEFAULT_PROJECT)
@@ -229,27 +248,22 @@ def log_bar(
     series: dict[str, list],
     stack: bool = False,
 ) -> None:
-    """Log a bar chart as a native SwanLab echarts Bar.
-
-    Args:
-        key:    Metric name shown in SwanLab.
-        xaxis:  Category labels for the x-axis.
-        series: Dict mapping series name → list of y values (same length as xaxis).
-        stack:  If True, all series are stacked onto each other.
-    """
     if not _is_initialised():
         return
     try:
-        from pyecharts.options.series_options import LabelOpts
+        from pyecharts.options.series_options import ItemStyleOpts, LabelOpts
 
+        base = _key_base(key)
         chart = swanlab.echarts.Bar()
         chart.add_xaxis(xaxis)
-        for name, values in series.items():
+        for idx, (name, values) in enumerate(series.items()):
+            color = _PALETTE[(base + idx) % len(_PALETTE)]
             chart.add_yaxis(
                 name,
                 [round(float(v), 4) if v is not None else None for v in values],
                 stack="stack0" if stack else None,
                 label_opts=LabelOpts(is_show=False),
+                itemstyle_opts=ItemStyleOpts(color=color),
             )
         swanlab.log({key: chart})
     except Exception:
@@ -262,14 +276,6 @@ def log_line(
     series: dict[str, list],
     smooth: bool = False,
 ) -> None:
-    """Log a multi-series line chart as a native SwanLab echarts Line.
-
-    Args:
-        key:    Metric name shown in SwanLab.
-        xaxis:  X-axis labels (e.g. checkpoint names).
-        series: Dict mapping series name → list of y values.
-        smooth: If True, render as smooth curves by default (user can toggle).
-    """
     if not _is_initialised():
         return
     try:
@@ -280,15 +286,19 @@ def log_line(
             ToolBoxFeatureMagicTypeOpts,
             ToolBoxFeatureRestoreOpts,
         )
+        from pyecharts.options.series_options import ItemStyleOpts
 
         chart = swanlab.echarts.Line()
         chart.add_xaxis(xaxis)
-        for name, values in series.items():
+        base = _key_base(key)
+        for idx, (name, values) in enumerate(series.items()):
+            color = _PALETTE[(base + idx) % len(_PALETTE)]
             chart.add_yaxis(
                 name,
                 [round(float(v), 6) if v is not None else None for v in values],
                 is_smooth=smooth,
                 is_symbol_show=False,
+                itemstyle_opts=ItemStyleOpts(color=color),
             )
         chart.set_global_opts(
             toolbox_opts=ToolboxOpts(
@@ -316,28 +326,23 @@ def log_scatter(
     yaxis_name: str,
     series: dict[str, list[tuple[float, float]]],
 ) -> None:
-    """Log a scatter plot as a native SwanLab echarts Scatter.
-
-    Args:
-        key:        Metric name shown in SwanLab.
-        xaxis_name: Label for the x-axis.
-        yaxis_name: Label for the y-axis.
-        series:     Dict mapping series name → list of (x, y) tuples.
-    """
     if not _is_initialised():
         return
     try:
-        from pyecharts.options.series_options import LabelOpts
+        from pyecharts.options.series_options import ItemStyleOpts, LabelOpts
 
         chart = swanlab.echarts.Scatter()
         chart.add_xaxis([])
-        for name, points in series.items():
+        base = _key_base(key)
+        for idx, (name, points) in enumerate(series.items()):
+            color = _PALETTE[(base + idx) % len(_PALETTE)]
             data = [[round(float(x), 6), round(float(y), 6)] for x, y in points]
             chart.add_yaxis(
                 name,
                 data,
                 symbol_size=5,
                 label_opts=LabelOpts(is_show=False),
+                itemstyle_opts=ItemStyleOpts(color=color),
             )
         chart.set_global_opts(
             xaxis_opts={"type": "value", "name": xaxis_name},
@@ -392,10 +397,14 @@ def log_boxplot(
     if not _is_initialised():
         return
     try:
+        from pyecharts.options.series_options import ItemStyleOpts
+
         chart = swanlab.echarts.Boxplot()
         chart.add_xaxis(xaxis)
-        for name, boxes in series.items():
-            chart.add_yaxis(name, boxes)
+        base = _key_base(key)
+        for idx, (name, boxes) in enumerate(series.items()):
+            color = _PALETTE[(base + idx) % len(_PALETTE)]
+            chart.add_yaxis(name, boxes, itemstyle_opts=ItemStyleOpts(color=color))
         swanlab.log({key: chart})
     except Exception:
         pass

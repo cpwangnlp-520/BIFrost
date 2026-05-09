@@ -316,6 +316,7 @@ def main() -> None:
         ("chain_scatter_min_draws", int, "Min draws per chain for scatter (auto)"),
         ("trajectory_top_n", int, "Top-N trajectories to plot (auto)"),
         ("source_label_max_len", int, "Max chars for source labels (auto)"),
+        ("heatmap_topk_max", int, "Max size for top-K BIF heatmap (auto)"),
         ("convergence_min_draws", int, "Min draws for convergence (auto)"),
     ]:
         p_analyze.add_argument(f"--{flag}", type=typ, default=None, help=help_txt)
@@ -713,7 +714,7 @@ def main() -> None:
             "boxplot_max_sources", "boxplot_min_per_source",
             "rhat_min_draws", "chain_scatter_min_draws",
             "trajectory_top_n", "source_label_max_len",
-            "convergence_min_draws",
+            "heatmap_topk_max", "convergence_min_draws",
         ):
             val = getattr(args, field_name, None)
             if val is not None and not (isinstance(val, bool) and not val):

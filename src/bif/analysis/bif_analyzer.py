@@ -64,6 +64,7 @@ class AnalyzeConfig:
     chain_scatter_min_draws: int | None = None
     trajectory_top_n: int | None = None
     source_label_max_len: int | None = None
+    heatmap_topk_max: int | None = None
     convergence_checkpoints: list[int] | None = None
     convergence_min_draws: int | None = None
 
@@ -123,6 +124,9 @@ def _auto_adapt_config(
 
     if acfg.source_label_max_len is None:
         acfg.source_label_max_len = 25
+
+    if acfg.heatmap_topk_max is None:
+        acfg.heatmap_topk_max = min(50, pool_size)
 
     if acfg.convergence_checkpoints is None:
         base = [3, 5, 10, 15, 20, 30, 50, 80, 100, 150, 200, 300, 500]
@@ -980,6 +984,7 @@ def _process_one_checkpoint(
         _log_bif_heatmap_topk(
             bif_mat, df, loaded["pool_ids"], acfg.top_k, ck_name,
             score_col=acfg.score_col,
+            heatmap_topk_max=acfg.heatmap_topk_max,
         )
         _log_score_by_source(
             df, acfg.score_col, acfg.top_k, ck_name,
@@ -1163,12 +1168,62 @@ def _log_cross_cov_heatmap(
     *,
     max_pool: int = 50,
     max_query: int = 20,
+    query_bar_limit: int = 30,
 ) -> None:
-    """Pool × Query cross-correlation heatmap, aggregated by source when available."""
+    """Query sensitivity: which queries are most/least influenced by pool data.
+
+    When query count <= query_bar_limit, shows per-query bar chart.
+    When query count > query_bar_limit, shows top-K / bottom-K bars + histogram
+    of query sensitivities (avoids overcrowded x-axis).
+    """
     n_pool = cross_corr_matrix.shape[0]
     n_query = cross_corr_matrix.shape[1]
-    max_q = min(max_query, n_query)
-    query_labels = [f"q{j}" for j in range(max_q)]
+
+    pool_mean_per_query = cross_corr_matrix[:, :n_query].mean(axis=0)
+    pool_std_per_query = cross_corr_matrix[:, :n_query].std(axis=0)
+
+    if n_query <= query_bar_limit:
+        query_labels = [f"q{j}" for j in range(n_query)]
+        log_bar(
+            f"3_influence/query_sensitivity/{ck_name}",
+            xaxis=query_labels,
+            series={
+                "mean_cross_corr": [round(float(v), 4) for v in pool_mean_per_query],
+                "std_cross_corr": [round(float(v), 4) for v in pool_std_per_query],
+            },
+        )
+    else:
+        sorted_idx = np.argsort(-pool_mean_per_query)
+        n_head = min(10, n_query)
+        n_tail = min(10, n_query)
+        head_idx = sorted_idx[:n_head]
+        tail_idx = sorted_idx[-n_tail:]
+
+        head_labels = [f"q{i}(#{rank+1})" for rank, i in enumerate(head_idx)]
+        tail_labels = [f"q{i}(#{n_query-n_tail+rank+1})" for rank, i in enumerate(tail_idx)]
+        all_labels = head_labels + ["..."] + tail_labels
+        head_vals = list(pool_mean_per_query[head_idx])
+        tail_vals = list(pool_mean_per_query[tail_idx])
+        all_means = [round(float(v), 4) for v in head_vals] + [None] + [round(float(v), 4) for v in tail_vals]
+        head_stds = list(pool_std_per_query[head_idx])
+        tail_stds = list(pool_std_per_query[tail_idx])
+        all_stds = [round(float(v), 4) for v in head_stds] + [None] + [round(float(v), 4) for v in tail_stds]
+
+        log_bar(
+            f"3_influence/query_sensitivity_top_bottom/{ck_name}",
+            xaxis=all_labels,
+            series={
+                "mean_cross_corr": all_means,
+                "std_cross_corr": all_stds,
+            },
+        )
+
+        labels_hist, counts_hist = _score_histogram_bars(pool_mean_per_query, bins=min(40, max(10, n_query // 5)))
+        log_bar(
+            f"3_influence/query_sensitivity_distribution/{ck_name}",
+            xaxis=labels_hist,
+            series={"count": counts_hist},
+        )
 
     if pool_sources is not None and len(pool_sources) == n_pool:
         sources = sorted(set(pool_sources))
@@ -1176,26 +1231,31 @@ def _log_cross_cov_heatmap(
         for i in range(n_pool):
             source_to_indices[pool_sources[i]].append(i)
 
-        source_query_mat = np.zeros((len(sources), max_q))
-        for i, src in enumerate(sources):
-            idx = source_to_indices[src]
-            source_query_mat[i] = cross_corr_matrix[idx, :max_q].mean(axis=0)
+        src_query_mat = np.array([
+            cross_corr_matrix[source_to_indices[src], :n_query].mean(axis=0)
+            for src in sources
+        ])
+        inter_source_std = src_query_mat.std(axis=0)
 
-        source_mean_corr = source_query_mat.mean(axis=1)
-        sorted_idx = np.argsort(-source_mean_corr)
-        sources_sorted = [sources[i] for i in sorted_idx]
-        mat_sorted = source_query_mat[sorted_idx]
-
-        log_heatmap(
-            f"3_influence/source_x_query_heatmap/{ck_name}",
-            xaxis=query_labels,
-            yaxis=sources_sorted,
-            matrix=mat_sorted,
-            value_label="mean_cross_corr",
-        )
+        if n_query <= query_bar_limit:
+            query_labels = [f"q{j}" for j in range(n_query)]
+            log_bar(
+                f"3_influence/query_sensitivity_source_spread/{ck_name}",
+                xaxis=query_labels,
+                series={"inter_source_std": [round(float(v), 6) for v in inter_source_std]},
+            )
+        else:
+            labels_hist, counts_hist = _score_histogram_bars(inter_source_std, bins=min(30, max(10, n_query // 10)))
+            log_bar(
+                f"3_influence/query_sensitivity_source_spread_dist/{ck_name}",
+                xaxis=labels_hist,
+                series={"count": counts_hist},
+            )
     else:
         max_p = min(max_pool, n_pool)
+        max_q = min(max_query, n_query)
         pool_labels = [f"p{i}" for i in range(max_p)]
+        query_labels = [f"q{j}" for j in range(max_q)]
         log_heatmap(
             f"3_influence/pool_x_query_heatmap/{ck_name}",
             xaxis=query_labels,
@@ -1212,23 +1272,35 @@ def _log_bif_heatmap_topk(
     top_k: int,
     ck_name: str,
     score_col: str = "bif_mean",
+    *,
+    heatmap_topk_max: int = 50,
 ) -> None:
-    """Top-K pool samples BIF submatrix heatmap + source×source block sorted by score."""
+    """Replace giant heatmap with interpretable summary charts.
+
+    Old approach: 50×50 (or 500×500) heatmap — unreadable and huge.
+    New approach:
+      1. topk_pairwise_corr_distribution — histogram of pairwise BIF correlations
+         among top-K samples (shows whether top samples form a cluster or are diverse).
+      2. intra_vs_inter_source_corr — bar chart comparing within-source vs
+         cross-source mean BIF correlation per source (shows source block structure
+         or its absence).
+      3. topk_source_overlap — small heatmap showing which sources contribute to
+         the top-K and how much they overlap with each other.
+    """
     n_pool = bif_mat.shape[0]
-    k = min(top_k, n_pool)
-    top_idx = np.arange(k)
+    k = min(heatmap_topk_max, top_k, n_pool)
+    mat = bif_mat[:k, :k].copy()
+    np.fill_diagonal(mat, np.nan)
 
-    sub_labels = []
-    for i in top_idx:
-        src = str(df.iloc[i].get("source", ""))[:12] if "source" in df.columns else ""
-        sub_labels.append(f"r{i+1}[{src}]" if src else f"r{i+1}")
+    valid = mat[~np.isnan(mat)]
+    if len(valid) == 0:
+        return
 
-    log_heatmap(
-        f"3_influence/bif_top{k}_heatmap/{ck_name}",
-        xaxis=sub_labels,
-        yaxis=sub_labels,
-        matrix=bif_mat[np.ix_(top_idx, top_idx)],
-        value_label="BIF corr",
+    labels, counts = _score_histogram_bars(valid, bins=min(40, max(10, k // 2)))
+    log_bar(
+        f"3_influence/topk_pairwise_corr_distribution/{ck_name}",
+        xaxis=labels,
+        series={"count": counts},
     )
 
     if "source" in df.columns:
@@ -1237,33 +1309,57 @@ def _log_bif_heatmap_topk(
             source_score = {}
             for src in sources:
                 mask = (df["source"].fillna("unknown") == src).to_numpy()
-                if score_col in df.columns:
-                    source_score[src] = float(df.loc[mask, score_col].mean())
-                else:
-                    source_score[src] = 0.0
+                source_score[src] = float(df.loc[mask, score_col].mean()) if score_col in df.columns else 0.0
 
             sources_sorted = sorted(sources, key=lambda s: -source_score.get(s, 0))
+            src_labels = [str(s)[:20] for s in sources_sorted]
 
-            source_block = np.zeros((len(sources_sorted), len(sources_sorted)))
-            for i, src_i in enumerate(sources_sorted):
-                mask_i = (df["source"].fillna("unknown") == src_i).to_numpy()
-                for j, src_j in enumerate(sources_sorted):
-                    mask_j = (df["source"].fillna("unknown") == src_j).to_numpy()
+            intra_vals = []
+            inter_vals = []
+            for src in sources_sorted:
+                mask_i = (df["source"].fillna("unknown") == src).to_numpy()
+                idx_i = np.where(mask_i)[0]
+                if len(idx_i) > 1:
+                    sub = bif_mat[np.ix_(idx_i, idx_i)]
+                    intra_vals.append(float(sub[~np.eye(len(idx_i), dtype=bool)].mean()))
+                else:
+                    intra_vals.append(0.0)
+
+                other_idx = np.where(~mask_i)[0]
+                if len(other_idx) > 0 and len(idx_i) > 0:
+                    inter_vals.append(float(bif_mat[np.ix_(idx_i, other_idx)].mean()))
+                else:
+                    inter_vals.append(0.0)
+
+            log_bar(
+                f"3_influence/intra_vs_inter_source_corr/{ck_name}",
+                xaxis=src_labels,
+                series={
+                    "intra_source_mean": [round(v, 4) for v in intra_vals],
+                    "inter_source_mean": [round(v, 4) for v in inter_vals],
+                },
+            )
+
+            n_src = len(sources_sorted)
+            overlap_mat = np.zeros((n_src, n_src))
+            for i, si in enumerate(sources_sorted):
+                for j, sj in enumerate(sources_sorted):
                     if i == j:
-                        ii = np.where(mask_i)[0]
-                        if len(ii) > 1:
-                            sub = bif_mat[np.ix_(ii, ii)]
-                            source_block[i, j] = float(sub[~np.eye(len(ii), dtype=bool)].mean())
-                        else:
-                            source_block[i, j] = 0.0
+                        overlap_mat[i, j] = float((df.head(k)["source"].fillna("unknown") == si).sum())
                     else:
-                        source_block[i, j] = float(bif_mat[np.ix_(mask_i, mask_j)].mean())
+                        top_mask = (df.head(k)["source"].fillna("unknown") == si).values
+                        si_idx = np.where(top_mask)[0]
+                        sj_all = np.where((df["source"].fillna("unknown") == sj).values)[0]
+                        if len(si_idx) > 0 and len(sj_all) > 0:
+                            overlap_mat[i, j] = float(bif_mat[np.ix_(si_idx, sj_all)].mean())
+                        else:
+                            overlap_mat[i, j] = 0.0
             log_heatmap(
-                f"3_influence/bif_source_blocks/{ck_name}",
-                xaxis=sources_sorted,
-                yaxis=sources_sorted,
-                matrix=source_block,
-                value_label="mean BIF",
+                f"3_influence/topk_source_overlap/{ck_name}",
+                xaxis=src_labels,
+                yaxis=src_labels,
+                matrix=overlap_mat,
+                value_label="mean_BIF",
             )
 
 
