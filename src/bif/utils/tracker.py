@@ -214,9 +214,9 @@ def log_heatmap(
             label_opts=LabelOpts(is_show=show_labels),
         )
         chart.set_global_opts(
-            visual_map_opts={"min": round(float(matrix.min()), precision),
-                             "max": round(float(matrix.max()), precision),
-                             "calculable": True},
+            visualmap_opts={"min": round(float(matrix.min()), precision),
+                            "max": round(float(matrix.max()), precision),
+                            "calculable": True},
         )
         swanlab.log({key: chart})
     except Exception:
@@ -327,11 +327,18 @@ def log_scatter(
     if not _is_initialised():
         return
     try:
+        from pyecharts.options.series_options import LabelOpts
+
         chart = swanlab.echarts.Scatter()
         chart.add_xaxis([])
         for name, points in series.items():
             data = [[round(float(x), 6), round(float(y), 6)] for x, y in points]
-            chart.add_yaxis(name, data, symbol_size=5)
+            chart.add_yaxis(
+                name,
+                data,
+                symbol_size=5,
+                label_opts=LabelOpts(is_show=False),
+            )
         chart.set_global_opts(
             xaxis_opts={"type": "value", "name": xaxis_name},
             yaxis_opts={"type": "value", "name": yaxis_name},

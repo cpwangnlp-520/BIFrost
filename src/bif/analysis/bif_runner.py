@@ -53,7 +53,6 @@ from bif.utils.naming import (
 from bif.utils.tracker import finish as swan_finish
 from bif.utils.tracker import init_run
 from bif.utils.tracker import log as swan_log
-from bif.utils.tracker import log_line as swan_log_line
 
 logger = get_logger("bif.runner")
 
@@ -374,38 +373,69 @@ def _save_traces_legacy_jsonl(
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _log_all_chains_overlay(out_dir: str, chain_ids: list[int]) -> None:
-    """Create a combined log_line chart with all chains' pool/query loss overlaid."""
-    all_pool: dict[str, list[float]] = {}
-    all_query: dict[str, list[float]] = {}
-    max_draws = 0
+def _log_all_chains_overlay(
+    out_dir: str,
+    chain_ids: list[int],
+    num_burnin_draws: int,
+) -> None:
+    """Log multi-chain overlay as native SwanLab time-series (includes burnin).
+
+    Reads saved .npz traces (post-burnin) and burnin_loss_trace.npz, then
+    reconstructs the full draw-by-draw series. Each chain logs its pool/query
+    loss mean at each draw step, so SwanLab overlays them natively.
+    """
+    all_pool: dict[int, list[float]] = {}
+    all_query: dict[int, list[float]] = {}
+    max_total_draws = 0
 
     for cid in chain_ids:
         chain_dir = os.path.join(out_dir, f"chain_{cid:03d}")
+
         npz_path = os.path.join(chain_dir, "observable_loss_trace.npz")
         if not os.path.isfile(npz_path):
             continue
         data = np.load(npz_path)
-        pool_mean = data["seq_loss"].mean(axis=1).tolist()
-        all_pool[f"chain_{cid}"] = pool_mean
-        max_draws = max(max_draws, len(pool_mean))
+        post_pool = data["seq_loss"].mean(axis=1).tolist()
+
+        burnin_pool = []
+        burnin_query = []
+        burnin_npz = os.path.join(chain_dir, "burnin_loss_trace.npz")
+        if os.path.isfile(burnin_npz):
+            bdata = np.load(burnin_npz)
+            burnin_pool = bdata["pool_loss_mean"].tolist()
+            burnin_query = bdata["query_loss_mean"].tolist()
+
+        all_pool[cid] = burnin_pool + post_pool
+        all_query[cid] = burnin_query
 
         query_npz = os.path.join(chain_dir, "query_loss_trace.npz")
         if os.path.isfile(query_npz):
             qdata = np.load(query_npz)
-            query_mean = qdata["seq_loss"].mean(axis=1).tolist()
-            all_query[f"chain_{cid}"] = query_mean
+            post_query = qdata["seq_loss"].mean(axis=1).tolist()
+            all_query[cid] = burnin_query + post_query
+
+        max_total_draws = max(max_total_draws, len(all_pool[cid]))
 
     if len(all_pool) < 2:
         return
 
-    xaxis = [str(i) for i in range(max_draws)]
-    swan_log_line("4_1_bif/pool_loss_all_chains", xaxis=xaxis, series=all_pool)
-
-    if len(all_query) >= 2:
-        max_q = max(len(v) for v in all_query.values())
-        q_xaxis = [str(i) for i in range(max_q)]
-        swan_log_line("4_1_bif/query_loss_all_chains", xaxis=q_xaxis, series=all_query)
+    for draw_idx in range(max_total_draws):
+        data = {}
+        for cid in chain_ids:
+            pool_list = all_pool.get(cid)
+            if pool_list is None:
+                continue
+            if draw_idx < len(pool_list):
+                data[f"4_1_bif/pool_loss_all_chains/chain_{cid}"] = float(
+                    pool_list[draw_idx]
+                )
+            q_list = all_query.get(cid)
+            if q_list is not None and draw_idx < len(q_list):
+                data[f"4_1_bif/query_loss_all_chains/chain_{cid}"] = float(
+                    q_list[draw_idx]
+                )
+        if data:
+            swan_log(data, step=draw_idx)
 
 
 def run_bif(
@@ -621,6 +651,9 @@ def run_bif(
         query_seq_losses: list[torch.Tensor] = []
         query_token_losses: list[torch.Tensor] = []
 
+        burnin_pool_means: list[float] = []
+        burnin_query_means: list[float] = []
+
         total_steps = sgld_cfg.num_burnin_steps + sgld_cfg.draws_per_chain * sgld_cfg.num_steps_bw_draws
         num_burnin_draws = sgld_cfg.num_burnin_steps // sgld_cfg.num_steps_bw_draws
         draw_count = 0
@@ -705,6 +738,8 @@ def run_bif(
                     }
                     obs_data.update(_sgld_draw_summary(chain_id, step))
                     swan_log(obs_data, step=burnin_draw_count)
+                burnin_pool_means.append(float(pool_seq.mean()))
+                burnin_query_means.append(float(query_seq.mean()))
                 burnin_draw_count += 1
                 draw_grad_norms.clear()
                 draw_noise_norms.clear()
@@ -771,6 +806,13 @@ def run_bif(
 
         _save_traces_npz(chain_dir, chain_id, pool_seq_losses, pool_token_losses, pool_obs)
 
+        if burnin_pool_means:
+            np.savez_compressed(
+                os.path.join(chain_dir, "burnin_loss_trace.npz"),
+                pool_loss_mean=np.array(burnin_pool_means),
+                query_loss_mean=np.array(burnin_query_means),
+            )
+
         query_meta = {
             "chain_id": chain_id,
             "num_draws": len(query_seq_losses),
@@ -825,7 +867,8 @@ def run_bif(
         _barrier()
 
     if rank == 0 and len(assigned_chains) > 1:
-        _log_all_chains_overlay(out_dir, assigned_chains)
+        num_burnin_draws = sgld_cfg.num_burnin_steps // max(1, sgld_cfg.num_steps_bw_draws)
+        _log_all_chains_overlay(out_dir, assigned_chains, num_burnin_draws)
 
     if manage_tracking and rank == 0:
         swan_finish()
