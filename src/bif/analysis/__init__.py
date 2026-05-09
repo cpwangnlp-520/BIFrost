@@ -1,6 +1,7 @@
 """Analysis modules."""
 
 from bif.analysis.bif_analyzer import (
+    AnalyzeConfig,
     analyze_bif_results,
     compute_bif_scores,
     load_checkpoint_traces,
@@ -13,6 +14,7 @@ from bif.analysis.extractor import extract_top_samples
 from bif.analysis.schedule_analyzer import analyze_schedule_compare
 
 __all__ = [
+    "AnalyzeConfig",
     "run_bif",
     "compute_bif_scores",
     "load_checkpoint_traces",

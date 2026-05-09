@@ -118,6 +118,12 @@ def main() -> None:
     p_train.add_argument("--logging_steps", type=int, default=10)
     p_train.add_argument("--min_eval_steps", type=int, default=20)
     p_train.add_argument("--eval_steps", type=int, default=0)
+    p_train.add_argument("--save_steps", type=int, default=0)
+    p_train.add_argument("--save_strategy", default="steps", choices=["steps", "epoch", "no"],
+                         help="Checkpoint save strategy: steps, epoch, or no")
+    p_train.add_argument("--eval_strategy", default="steps", choices=["steps", "epoch", "no"],
+                         help="Evaluation strategy: steps, epoch, or no")
+    p_train.add_argument("--save_total_limit", type=int, default=6)
     p_train.add_argument("--bf16", action="store_true")
     p_train.add_argument("--fp16", action="store_true")
     p_train.add_argument("--gradient_checkpointing", action="store_true")
@@ -271,8 +277,8 @@ def main() -> None:
     )
     p_analyze.add_argument("--bif_root", default=None)
     p_analyze.add_argument("--out_dir", default=None)
-    p_analyze.add_argument("--score_col", default="bif_mean")
-    p_analyze.add_argument("--top_k", type=int, default=500)
+    p_analyze.add_argument("--score_col", default=None)
+    p_analyze.add_argument("--top_k", type=int, default=None)
     p_analyze.add_argument(
         "--negate_scores",
         action="store_true",
@@ -295,6 +301,30 @@ def main() -> None:
         "--run_name",
         default=None,
         help="SwanLab run display name within the experiment.",
+    )
+    for flag, typ, help_txt in [
+        ("hist_bins", int, "Histogram bins (auto)"),
+        ("scatter_max_points", int, "Max points in scatter plots (auto)"),
+        ("heatmap_max_pool", int, "Max pool rows in heatmap (auto)"),
+        ("heatmap_max_query", int, "Max query cols in heatmap (auto)"),
+        ("rhat_max_samples", int, "Max samples for R-hat (auto)"),
+        ("eigenvalue_max_pool", int, "Skip eigenvalue if pool > this (auto)"),
+        ("eigenvalue_max_ev", int, "Max eigenvalues to plot (auto)"),
+        ("boxplot_max_sources", int, "Max sources for boxplot (auto)"),
+        ("boxplot_min_per_source", int, "Min samples per source for boxplot (auto)"),
+        ("rhat_min_draws", int, "Min draws per chain for R-hat (auto)"),
+        ("chain_scatter_min_draws", int, "Min draws per chain for scatter (auto)"),
+        ("trajectory_top_n", int, "Top-N trajectories to plot (auto)"),
+        ("source_label_max_len", int, "Max chars for source labels (auto)"),
+        ("convergence_min_draws", int, "Min draws for convergence (auto)"),
+    ]:
+        p_analyze.add_argument(f"--{flag}", type=typ, default=None, help=help_txt)
+    p_analyze.add_argument(
+        "--convergence_checkpoints",
+        type=int,
+        nargs="+",
+        default=None,
+        help="Draw counts for convergence plot (auto)",
     )
 
     p_extract = sub.add_parser("extract-top", help="Extract top-influence samples")
@@ -552,6 +582,10 @@ def main() -> None:
             logging_steps=args.logging_steps,
             min_eval_steps=args.min_eval_steps,
             eval_steps=args.eval_steps,
+            save_steps=getattr(args, "save_steps", 0),
+            save_strategy=getattr(args, "save_strategy", "steps"),
+            eval_strategy=getattr(args, "eval_strategy", "steps"),
+            save_total_limit=getattr(args, "save_total_limit", 6),
             bf16=args.bf16,
             fp16=args.fp16,
             gradient_checkpointing=args.gradient_checkpointing,
@@ -659,7 +693,7 @@ def main() -> None:
             _sys.argv = _saved
 
     elif args.command == "analyze-bif":
-        from bif.analysis.bif_analyzer import analyze_bif_results
+        from bif.analysis.bif_analyzer import AnalyzeConfig, analyze_bif_results
 
         if args.bif_root is None and args.config is None:
             parser.error("analyze-bif requires --bif_root or --config")
@@ -669,14 +703,30 @@ def main() -> None:
         if out_dir is None and bif_root is not None:
             out_dir = f"{bif_root}/analysis"
 
+        acfg = AnalyzeConfig()
+        for field_name in (
+            "score_col", "top_k", "negate_scores",
+            "save_full_query_matrix", "hist_bins",
+            "scatter_max_points", "heatmap_max_pool",
+            "heatmap_max_query", "rhat_max_samples",
+            "eigenvalue_max_pool", "eigenvalue_max_ev",
+            "boxplot_max_sources", "boxplot_min_per_source",
+            "rhat_min_draws", "chain_scatter_min_draws",
+            "trajectory_top_n", "source_label_max_len",
+            "convergence_min_draws",
+        ):
+            val = getattr(args, field_name, None)
+            if val is not None and not (isinstance(val, bool) and not val):
+                setattr(acfg, field_name, val)
+        if getattr(args, "convergence_checkpoints", None) is not None:
+            acfg.convergence_checkpoints = args.convergence_checkpoints
+
         analyze_bif_results(
             bif_root=bif_root,
             out_dir=out_dir,
-            score_col=args.score_col,
-            top_k=args.top_k,
+            acfg=acfg,
             experiment_name=args.experiment_name,
             run_name=args.run_name,
-            negate_scores=args.negate_scores,
         )
 
     elif args.command == "extract-top":

@@ -41,16 +41,19 @@ from bif.training.loss import per_example_causal_lm_loss, per_token_causal_lm_lo
 from bif.training.sgld import LocalizedSGLDSampler, RMSpropSGLDSampler, create_sampler
 from bif.utils.logging import get_logger
 from bif.utils.naming import (
-    fmt_lr,
     fmt_ckpt_short,
-    guess_model_tag as _guess_model_tag,
+    fmt_lr,
     make_bif_name,
     make_bif_pipeline_name,
     resolve_model_tag,
 )
+from bif.utils.naming import (
+    guess_model_tag as _guess_model_tag,
+)
 from bif.utils.tracker import finish as swan_finish
 from bif.utils.tracker import init_run
 from bif.utils.tracker import log as swan_log
+from bif.utils.tracker import log_line as swan_log_line
 
 logger = get_logger("bif.runner")
 
@@ -371,6 +374,40 @@ def _save_traces_legacy_jsonl(
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _log_all_chains_overlay(out_dir: str, chain_ids: list[int]) -> None:
+    """Create a combined log_line chart with all chains' pool/query loss overlaid."""
+    all_pool: dict[str, list[float]] = {}
+    all_query: dict[str, list[float]] = {}
+    max_draws = 0
+
+    for cid in chain_ids:
+        chain_dir = os.path.join(out_dir, f"chain_{cid:03d}")
+        npz_path = os.path.join(chain_dir, "observable_loss_trace.npz")
+        if not os.path.isfile(npz_path):
+            continue
+        data = np.load(npz_path)
+        pool_mean = data["seq_loss"].mean(axis=1).tolist()
+        all_pool[f"chain_{cid}"] = pool_mean
+        max_draws = max(max_draws, len(pool_mean))
+
+        query_npz = os.path.join(chain_dir, "query_loss_trace.npz")
+        if os.path.isfile(query_npz):
+            qdata = np.load(query_npz)
+            query_mean = qdata["seq_loss"].mean(axis=1).tolist()
+            all_query[f"chain_{cid}"] = query_mean
+
+    if len(all_pool) < 2:
+        return
+
+    xaxis = [str(i) for i in range(max_draws)]
+    swan_log_line("4_1_bif/pool_loss_all_chains", xaxis=xaxis, series=all_pool)
+
+    if len(all_query) >= 2:
+        max_q = max(len(v) for v in all_query.values())
+        q_xaxis = [str(i) for i in range(max_q)]
+        swan_log_line("4_1_bif/query_loss_all_chains", xaxis=q_xaxis, series=all_query)
+
+
 def run_bif(
     model_name_or_path: str,
     pool_jsonl: str,
@@ -560,8 +597,10 @@ def run_bif(
             noise_gen = torch.Generator(device=device)
             noise_gen.manual_seed(sgld_cfg.seed + chain_id)
 
-        from torch.utils.data import DataLoader as _DataLoader
         from itertools import cycle as _cycle
+
+        from torch.utils.data import DataLoader as _DataLoader
+
         from bif.data.dataset import collate_bif_batch as _collate
 
         loader = _DataLoader(
@@ -589,6 +628,30 @@ def run_bif(
         grad_accum = sgld_cfg.gradient_accumulation_steps
         steps_since_draw = sgld_cfg.num_steps_bw_draws
 
+        draw_grad_norms: list[float] = []
+        draw_noise_norms: list[float] = []
+        draw_step_losses: list[float] = []
+        draw_snrs: list[float] = []
+
+        def _sgld_draw_summary(chain_id: int, step: int) -> dict[str, float]:
+            if not draw_grad_norms:
+                return {}
+            gn = np.array(draw_grad_norms)
+            nn = np.array(draw_noise_norms)
+            sl = np.array(draw_step_losses)
+            sr = np.array(draw_snrs)
+            return {
+                f"4_1_bif/chain{chain_id}/draw/grad_norm_mean": float(gn.mean()),
+                f"4_1_bif/chain{chain_id}/draw/grad_norm_max": float(gn.max()),
+                f"4_1_bif/chain{chain_id}/draw/noise_norm_mean": float(nn.mean()),
+                f"4_1_bif/chain{chain_id}/draw/noise_norm_max": float(nn.max()),
+                f"4_1_bif/chain{chain_id}/draw/step_loss_mean": float(sl.mean()),
+                f"4_1_bif/chain{chain_id}/draw/snr_mean": float(sr.mean()),
+                f"4_1_bif/chain{chain_id}/draw/snr_min": float(sr.min()),
+                f"4_1_bif/chain{chain_id}/draw/num_steps": len(draw_grad_norms),
+                f"4_1_bif/chain{chain_id}/draw/actual_sgld_step": step,
+            }
+
         pbar = tqdm(range(total_steps), desc=f"Chain {chain_id}", disable=(rank != 0))
         for step in pbar:
             is_burnin = step < sgld_cfg.num_burnin_steps
@@ -602,6 +665,14 @@ def run_bif(
                 step_info = sampler.step(batch, step_generator=noise_gen)
 
             steps_since_draw += 1
+
+            draw_grad_norms.append(float(step_info["grad_norm"]))
+            draw_noise_norms.append(float(step_info["noise_norm"]))
+            draw_step_losses.append(float(step_info["loss"]))
+            draw_snrs.append(
+                float(step_info["grad_norm"])
+                / (float(step_info["noise_norm"]) + 1e-12)
+            )
 
             is_draw_step = (
                 not is_burnin
@@ -627,15 +698,18 @@ def run_bif(
                     break
 
                 if rank == 0:
-                    swan_log(
-                        {
-                            f"4_1_bif/chain{chain_id}/pool_loss_mean": float(pool_seq.mean()),
-                            f"4_1_bif/chain{chain_id}/query_loss_mean": float(query_seq.mean()),
-                            f"4_1_bif/chain{chain_id}/is_burnin": 1,
-                        },
-                        step=burnin_draw_count,
-                    )
+                    obs_data = {
+                        f"4_1_bif/chain{chain_id}/pool_loss_mean": float(pool_seq.mean()),
+                        f"4_1_bif/chain{chain_id}/query_loss_mean": float(query_seq.mean()),
+                        f"4_1_bif/chain{chain_id}/is_burnin": 1,
+                    }
+                    obs_data.update(_sgld_draw_summary(chain_id, step))
+                    swan_log(obs_data, step=burnin_draw_count)
                 burnin_draw_count += 1
+                draw_grad_norms.clear()
+                draw_noise_norms.clear()
+                draw_step_losses.clear()
+                draw_snrs.clear()
 
             if is_draw_step:
                 steps_since_draw = 0
@@ -671,15 +745,18 @@ def run_bif(
                             for n, p in sampler.params
                         )
                         param_dist = param_dist_sq ** 0.5
-                    swan_log(
-                        {
-                            f"4_1_bif/chain{chain_id}/pool_loss_mean": float(pool_seq.mean()),
-                            f"4_1_bif/chain{chain_id}/query_loss_mean": float(query_seq.mean()),
-                            f"4_1_bif/chain{chain_id}/param_dist_from_anchor": param_dist,
-                            f"4_1_bif/chain{chain_id}/is_burnin": 0,
-                        },
-                        step=draw_idx,
-                    )
+                    obs_data = {
+                        f"4_1_bif/chain{chain_id}/pool_loss_mean": float(pool_seq.mean()),
+                        f"4_1_bif/chain{chain_id}/query_loss_mean": float(query_seq.mean()),
+                        f"4_1_bif/chain{chain_id}/param_dist_from_anchor": param_dist,
+                        f"4_1_bif/chain{chain_id}/is_burnin": 0,
+                    }
+                    obs_data.update(_sgld_draw_summary(chain_id, step))
+                    swan_log(obs_data, step=draw_idx)
+                    draw_grad_norms.clear()
+                    draw_noise_norms.clear()
+                    draw_step_losses.clear()
+                    draw_snrs.clear()
 
             if rank == 0:
                 swan_log(
@@ -746,6 +823,10 @@ def run_bif(
     logger.info("All chains completed on rank %d", rank)
     if not single_chain_mode:
         _barrier()
+
+    if rank == 0 and len(assigned_chains) > 1:
+        _log_all_chains_overlay(out_dir, assigned_chains)
+
     if manage_tracking and rank == 0:
         swan_finish()
 

@@ -57,6 +57,8 @@ def train_with_checkpoints(
     min_eval_steps: int = 20,
     save_steps: int = 0,
     eval_steps: int = 0,
+    save_strategy: str = "steps",
+    eval_strategy: str = "steps",
     save_total_limit: int = 6,
     gradient_checkpointing: bool = False,
     bf16: bool = False,
@@ -97,12 +99,25 @@ def train_with_checkpoints(
         num_gpus,
         num_train_epochs,
     )
-    actual_eval = (
-        eval_steps
-        if eval_steps > 0
-        else infer_interval(total_steps, target_num_checkpoints, min_eval_steps)
-    )
-    actual_save = save_steps if save_steps > 0 else actual_eval
+
+    if save_strategy == "steps":
+        actual_save = (
+            save_steps
+            if save_steps > 0
+            else infer_interval(total_steps, target_num_checkpoints, min_save_steps)
+        )
+    else:
+        actual_save = save_steps
+
+    if eval_strategy == "steps":
+        actual_eval = (
+            eval_steps
+            if eval_steps > 0
+            else infer_interval(total_steps, target_num_checkpoints, min_eval_steps)
+        )
+    else:
+        actual_eval = eval_steps
+
     load_best = can_load_best_model(deepspeed, fsdp)
 
     cuda_available = torch.cuda.is_available()
@@ -172,8 +187,8 @@ def train_with_checkpoints(
         warmup_steps=warmup_steps,
         lr_scheduler_type=lr_scheduler_type,
         logging_steps=logging_steps,
-        eval_strategy="steps",
-        save_strategy="steps",
+        eval_strategy=eval_strategy,
+        save_strategy=save_strategy,
         eval_steps=actual_eval,
         save_steps=actual_save,
         save_total_limit=save_total_limit,
@@ -223,7 +238,9 @@ def train_with_checkpoints(
         "best_metric": getattr(trainer.state, "best_metric", None),
         "global_step": int(trainer.state.global_step),
         "total_steps": total_steps,
+        "save_strategy": save_strategy,
         "save_steps": actual_save,
+        "eval_strategy": eval_strategy,
         "eval_steps": actual_eval,
         "deepspeed": deepspeed,
         "fsdp": fsdp,
@@ -269,6 +286,8 @@ def main() -> None:
     parser.add_argument("--min_eval_steps", type=int, default=20)
     parser.add_argument("--save_steps", type=int, default=0)
     parser.add_argument("--eval_steps", type=int, default=0)
+    parser.add_argument("--save_strategy", default="steps", choices=["steps", "epoch", "no"])
+    parser.add_argument("--eval_strategy", default="steps", choices=["steps", "epoch", "no"])
     parser.add_argument("--save_total_limit", type=int, default=6)
     parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--bf16", action="store_true")

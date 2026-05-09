@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import time
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -31,11 +31,107 @@ from bif.utils.tracker import (
     log_boxplot,
     log_heatmap,
     log_line,
-    log_pie,
     log_scatter,
     log_table,
 )
 from bif.utils.tracker import log as swan_log
+
+
+@dataclass
+class AnalyzeConfig:
+    """All configurable knobs for BIF analysis.
+
+    Visualization limit fields accept ``None`` to mean "auto-adapt from data".
+    When set to ``None``, ``_auto_adapt_config`` will compute a sensible value
+    after loading the traces.  Explicit values are always respected.
+    """
+
+    score_col: str = "bif_mean"
+    top_k: int | None = None
+    negate_scores: bool = False
+    save_full_query_matrix: bool = False
+
+    hist_bins: int | None = None
+    scatter_max_points: int | None = None
+    heatmap_max_pool: int | None = None
+    heatmap_max_query: int | None = None
+    rhat_max_samples: int | None = None
+    eigenvalue_max_pool: int | None = None
+    eigenvalue_max_ev: int | None = None
+    boxplot_max_sources: int | None = None
+    boxplot_min_per_source: int | None = None
+    rhat_min_draws: int | None = None
+    chain_scatter_min_draws: int | None = None
+    trajectory_top_n: int | None = None
+    source_label_max_len: int | None = None
+    convergence_checkpoints: list[int] | None = None
+    convergence_min_draws: int | None = None
+
+
+def _auto_adapt_config(
+    acfg: AnalyzeConfig,
+    pool_size: int,
+    query_size: int,
+    num_draws: int,
+    num_chains: int,
+    num_sources: int = 0,
+) -> AnalyzeConfig:
+    """Fill ``None`` fields in *acfg* based on actual data dimensions.
+
+    Returns the same object (mutated in-place) for convenience.
+    """
+    dpc = num_draws // max(num_chains, 1)
+
+    if acfg.top_k is None:
+        acfg.top_k = min(500, pool_size)
+
+    if acfg.hist_bins is None:
+        acfg.hist_bins = min(60, max(20, pool_size // 10))
+
+    if acfg.scatter_max_points is None:
+        acfg.scatter_max_points = min(500, pool_size)
+
+    if acfg.heatmap_max_pool is None:
+        acfg.heatmap_max_pool = min(50, pool_size)
+
+    if acfg.heatmap_max_query is None:
+        acfg.heatmap_max_query = min(20, query_size)
+
+    if acfg.rhat_max_samples is None:
+        acfg.rhat_max_samples = min(100, pool_size)
+
+    if acfg.eigenvalue_max_pool is None:
+        acfg.eigenvalue_max_pool = 1500
+
+    if acfg.eigenvalue_max_ev is None:
+        acfg.eigenvalue_max_ev = min(30, pool_size)
+
+    if acfg.boxplot_max_sources is None:
+        acfg.boxplot_max_sources = max(num_sources, 30)
+
+    if acfg.boxplot_min_per_source is None:
+        acfg.boxplot_min_per_source = max(3, pool_size // 200)
+
+    if acfg.rhat_min_draws is None:
+        acfg.rhat_min_draws = min(10, max(3, dpc // 3))
+
+    if acfg.chain_scatter_min_draws is None:
+        acfg.chain_scatter_min_draws = max(3, dpc // 5)
+
+    if acfg.trajectory_top_n is None:
+        acfg.trajectory_top_n = min(20, pool_size)
+
+    if acfg.source_label_max_len is None:
+        acfg.source_label_max_len = 25
+
+    if acfg.convergence_checkpoints is None:
+        base = [3, 5, 10, 15, 20, 30, 50, 80, 100, 150, 200, 300, 500]
+        acfg.convergence_checkpoints = [c for c in base if c <= num_draws]
+
+    if acfg.convergence_min_draws is None:
+        acfg.convergence_min_draws = max(3, num_draws // 20)
+
+    return acfg
 
 
 def _get_dist_context() -> tuple[int, int]:
@@ -488,14 +584,10 @@ def compute_bif_scores(
     pool_bif_matrix = compute_bif_pairwise(pool_seq_loss, num_chains, reduce_chains)
     query_bif_matrix = compute_bif_pairwise(query_seq_loss, num_chains, reduce_chains)
 
-    n_pool = pool_bif_matrix.shape[0]
-    n_query = query_bif_matrix.shape[0]
-
     np.fill_diagonal(pool_bif_matrix, 0.0)
     np.fill_diagonal(query_bif_matrix, 0.0)
 
     pool_bif_mean = pool_bif_matrix.mean(axis=1)
-    query_bif_mean = query_bif_matrix.mean(axis=1)
 
     pool_centered = pool_seq_loss - pool_seq_loss.mean(axis=0, keepdims=True)
     query_centered = query_seq_loss - query_seq_loss.mean(axis=0, keepdims=True)
@@ -518,6 +610,7 @@ def compute_bif_scores(
         "bif_matrix": pool_bif_matrix,
         "query_bif_matrix": query_bif_matrix,
         "cross_corr_mean_over_queries": sign * cross_corr.mean(axis=1),
+        "cross_corr_absmean_over_queries": sign * np.abs(cross_corr).mean(axis=1),
         "cross_corr_matrix": cross_corr,
         "cross_cov_avg_over_queries": sign * cross_cov.mean(axis=1),
         "mean_loss": mean_loss,
@@ -791,14 +884,11 @@ def _process_one_checkpoint(
     ck_name: str,
     ck_dir: str,
     out_dir: str,
-    score_col: str,
-    top_k: int,
-    save_full_query_matrix: bool,
+    acfg: AnalyzeConfig,
     ck_step: int = 0,
-    negate_scores: bool = True,
     pool_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
-    t0 = time.monotonic()
+    t0 = __import__("time").monotonic()
     try:
         loaded = load_checkpoint_traces(ck_dir)
     except ValueError as exc:
@@ -823,18 +913,20 @@ def _process_one_checkpoint(
         loaded["query_seq_loss"],
         num_chains=num_chains,
         reduce_chains="stack",
-        negate_scores=negate_scores,
+        negate_scores=acfg.negate_scores,
     )
     df = build_pool_score_df(loaded["pool_ids"], loaded["pool_meta"], scores)
-    if score_col not in df.columns:
-        raise ValueError(f"score_col={score_col!r} not in {df.columns.tolist()}")
-    df = df.sort_values(score_col, ascending=False).reset_index(drop=True)
+    if acfg.score_col not in df.columns:
+        raise ValueError(
+            f"score_col={acfg.score_col!r} not in {df.columns.tolist()}"
+        )
+    df = df.sort_values(acfg.score_col, ascending=False).reset_index(drop=True)
     df["rank"] = np.arange(1, len(df) + 1)
 
     ck_out = f"{out_dir}/{ck_name}"
     ensure_dir(ck_out)
     df.to_csv(f"{ck_out}/pool_scores.csv", index=False)
-    df.head(top_k).to_csv(f"{ck_out}/top_{top_k}.csv", index=False)
+    df.head(acfg.top_k).to_csv(f"{ck_out}/top_{acfg.top_k}.csv", index=False)
 
     bif_matrix_path = f"{ck_out}/bif_matrix.npy"
     np.save(bif_matrix_path, scores["bif_matrix"])
@@ -850,57 +942,109 @@ def _process_one_checkpoint(
         },
     )
 
-    if save_full_query_matrix:
+    if acfg.save_full_query_matrix:
         np.save(
-            f"{ck_out}/query_bif_matrix.npy", scores["query_bif_matrix"]
+            f"{ck_out}/query_pair_corr_matrix.npy",
+            scores["cross_corr_matrix"],
         )
 
-    scores_arr = df[score_col].to_numpy()
+    scores_arr = df[acfg.score_col].to_numpy()
     bif_mat = scores["bif_matrix"]
-    n_pool = bif_mat.shape[0]
     pool_mat = loaded["pool_seq_loss"]
     query_mat = loaded["query_seq_loss"]
 
     rank = int(os.environ.get("RANK", "0"))
     if rank == 0:
-        _log_loss_traces(pool_mat, query_mat, num_chains, ck_name)
-        _log_score_summary(scores_arr, loaded["num_draws"], ck_step)
-        _log_score_histogram(scores_arr, ck_name)
-        _log_corr_distribution(bif_mat, scores["cross_corr_matrix"], ck_name, df=df)
+        burnin_offset = _read_num_burnin_draws(ck_dir)
+        _log_loss_traces(
+            pool_mat, query_mat, num_chains, ck_name,
+            draw_offset=burnin_offset,
+        )
+        _log_score_histogram(scores_arr, ck_name, bins=acfg.hist_bins)
+        _log_corr_distribution(
+            bif_mat, scores["cross_corr_matrix"], ck_name,
+            bins=acfg.hist_bins,
+        )
         _log_score_vs_selfvar_scatter(
-            scores_arr, scores["cross_cov_avg_over_queries"],
-            pool_mat, query_mat, ck_name,
+            scores["cross_cov_avg_over_queries"],
+            pool_mat, ck_name,
+            max_points=acfg.scatter_max_points,
         )
         _log_cross_cov_heatmap(
             scores["cross_corr_matrix"], loaded["pool_ids"],
             loaded["query_ids"], ck_name,
             pool_sources=df["source"].fillna("unknown").tolist() if "source" in df.columns else None,
+            max_pool=acfg.heatmap_max_pool,
+            max_query=acfg.heatmap_max_query,
         )
         _log_bif_heatmap_topk(
-            bif_mat, df, loaded["pool_ids"], top_k, ck_name,
-            score_col=score_col,
+            bif_mat, df, loaded["pool_ids"], acfg.top_k, ck_name,
+            score_col=acfg.score_col,
         )
-        _log_score_by_source(df, score_col, top_k, ck_name)
-        _log_eigenvalue_spectrum(bif_mat, ck_name)
-        _log_convergence(pool_mat, num_chains, ck_name)
+        _log_score_by_source(
+            df, acfg.score_col, acfg.top_k, ck_name,
+            max_sources=acfg.boxplot_max_sources,
+            min_per_source=acfg.boxplot_min_per_source,
+            label_max_len=acfg.source_label_max_len,
+        )
+        _log_eigenvalue_spectrum(
+            bif_mat, ck_name,
+            max_pool=acfg.eigenvalue_max_pool,
+            max_ev=acfg.eigenvalue_max_ev,
+        )
+        _log_convergence(
+            pool_mat, num_chains, ck_name,
+            checkpoints=acfg.convergence_checkpoints,
+            min_draws=acfg.convergence_min_draws,
+        )
         if num_chains > 1:
-            _log_rhat(pool_mat, num_chains, ck_name, ck_step)
-            _log_chain_consistency(pool_mat, num_chains, scores_arr, ck_name, ck_step)
-            _log_chain_scatter(pool_mat, num_chains, scores_arr, ck_name)
+            _log_rhat(
+                pool_mat, num_chains, ck_name,
+                max_samples=acfg.rhat_max_samples,
+                min_draws=acfg.rhat_min_draws,
+            )
+            _log_chain_scatter(
+                pool_mat, num_chains, scores_arr, ck_name,
+                max_points=acfg.scatter_max_points,
+                min_draws=acfg.chain_scatter_min_draws,
+            )
 
-        _log_checkpoint_sample_table(df, score_col, top_k, ck_name, pool_df=pool_df)
+        _log_checkpoint_sample_table(
+            df, acfg.score_col, acfg.top_k, ck_name, pool_df=pool_df,
+        )
 
-        elapsed = time.monotonic() - t0
-        swan_log({"4_2_influence/seconds_per_checkpoint": round(elapsed, 2)}, step=ck_step)
-
+    elapsed = __import__("time").monotonic() - t0
     return {
         "checkpoint": ck_name,
         "num_draws": int(loaded["num_draws"]),
         "pool_size": len(loaded["pool_ids"]),
         "query_size": len(loaded.get("query_ids", [])),
-        "score_mean": float(df[score_col].mean()),
-        "score_std": float(df[score_col].std()),
+        "score_mean": float(df[acfg.score_col].mean()),
+        "score_std": float(df[acfg.score_col].std()),
+        "analysis_seconds": round(elapsed, 2),
     }
+
+
+def _read_num_burnin_draws(checkpoint_dir: str) -> int:
+    """Read num_burnin_draws from chain_config.json (saved by bif_runner)."""
+    for name in os.listdir(checkpoint_dir):
+        chain_dir = os.path.join(checkpoint_dir, name)
+        if not (os.path.isdir(chain_dir) and re.fullmatch(r"chain_\d+", name)):
+            continue
+        cfg_path = os.path.join(chain_dir, "chain_config.json")
+        if not os.path.isfile(cfg_path):
+            continue
+        try:
+            import json as _json
+            with open(cfg_path) as f:
+                cfg = _json.load(f)
+            sgld_cfg = cfg.get("sgld_config", {})
+            burnin_steps = int(sgld_cfg.get("num_burnin_steps", 0))
+            steps_bw = max(1, int(sgld_cfg.get("num_steps_bw_draws", 1)))
+            return burnin_steps // steps_bw
+        except Exception:
+            continue
+    return 0
 
 
 def _log_loss_traces(
@@ -908,8 +1052,14 @@ def _log_loss_traces(
     query_seq_loss: np.ndarray,
     num_chains: int,
     ck_name: str,
+    draw_offset: int = 0,
 ) -> None:
-    """Loss trace per draw — native swanlab.log time-series with zoom/align."""
+    """Loss trace per draw — native swanlab.log time-series with zoom/align.
+
+    Args:
+        draw_offset: Number of burnin draws to offset the x-axis by,
+            so post-burnin draw indices match the runner's x-axis.
+    """
     total = pool_seq_loss.shape[0]
     pool_mean = pool_seq_loss.mean(axis=1)
     pool_std = pool_seq_loss.std(axis=1)
@@ -932,7 +1082,7 @@ def _log_loss_traces(
                 query_cvals.append(qv)
             data[f"1_diag/{ck_name}/pool_loss/chains_mean"] = float(np.mean(pool_cvals))
             data[f"1_diag/{ck_name}/query_loss/chains_mean"] = float(np.mean(query_cvals))
-            swan_log(data, step=draw_idx)
+            swan_log(data, step=draw_offset + draw_idx)
     else:
         for draw_idx in range(total):
             swan_log({
@@ -940,30 +1090,13 @@ def _log_loss_traces(
                 f"1_diag/{ck_name}/pool_loss/std": float(pool_std[draw_idx]),
                 f"1_diag/{ck_name}/query_loss/mean": float(query_mean[draw_idx]),
                 f"1_diag/{ck_name}/query_loss/std": float(query_std[draw_idx]),
-            }, step=draw_idx)
+            }, step=draw_offset + draw_idx)
 
 
-def _log_score_summary(
-    scores_arr: np.ndarray, num_draws: int, ck_step: int,
+def _log_score_histogram(
+    scores_arr: np.ndarray, ck_name: str, *, bins: int = 40,
 ) -> None:
-    swan_log(
-        {
-            "2_scores/mean": float(scores_arr.mean()),
-            "2_scores/std": float(scores_arr.std()),
-            "2_scores/p10": float(np.percentile(scores_arr, 10)),
-            "2_scores/p50": float(np.percentile(scores_arr, 50)),
-            "2_scores/p90": float(np.percentile(scores_arr, 90)),
-            "2_scores/positive_frac": float((scores_arr > 0).mean()),
-            "2_scores/min": float(scores_arr.min()),
-            "2_scores/max": float(scores_arr.max()),
-            "2_scores/num_draws": int(num_draws),
-        },
-        step=ck_step,
-    )
-
-
-def _log_score_histogram(scores_arr: np.ndarray, ck_name: str) -> None:
-    labels, counts = _score_histogram_bars(scores_arr, bins=40)
+    labels, counts = _score_histogram_bars(scores_arr, bins=bins)
     log_bar(f"2_scores/distribution/{ck_name}", xaxis=labels, series={"count": counts})
 
 
@@ -971,74 +1104,40 @@ def _log_corr_distribution(
     bif_matrix: np.ndarray,
     cross_corr_matrix: np.ndarray,
     ck_name: str,
-    df: pd.DataFrame | None = None,
+    *,
+    bins: int = 40,
 ) -> None:
     n_pool = bif_matrix.shape[0]
     triu_idx = np.triu_indices(n_pool, k=1)
     pool_corr_vals = bif_matrix[triu_idx]
     cross_corr_avg = cross_corr_matrix.mean(axis=1)
 
-    pool_labels, pool_counts = _score_histogram_bars(pool_corr_vals, bins=40)
+    pool_labels, pool_counts = _score_histogram_bars(pool_corr_vals, bins=bins)
     log_bar(
         f"3_influence/pool_corr_distribution/{ck_name}",
         xaxis=pool_labels,
         series={"count": pool_counts},
     )
 
-    cross_labels, cross_counts = _score_histogram_bars(cross_corr_avg, bins=40)
+    cross_labels, cross_counts = _score_histogram_bars(cross_corr_avg, bins=bins)
     log_bar(
         f"3_influence/cross_corr_distribution/{ck_name}",
         xaxis=cross_labels,
         series={"count": cross_counts},
     )
 
-    if df is not None and "source" in df.columns:
-        sources = sorted(df["source"].fillna("unknown").unique().tolist())
-        if len(sources) >= 2:
-            pool_by_src = {}
-            cross_by_src = {}
-            for src in sources:
-                idx = df.index[df["source"].fillna("unknown") == src].tolist()
-                if len(idx) < 2:
-                    continue
-                safe_src = str(src)[:30]
-                sub_mat = bif_matrix[np.ix_(idx, idx)]
-                sub_triu = np.triu_indices(len(idx), k=1)
-                pool_by_src[safe_src] = sub_mat[sub_triu].tolist()
-                cross_by_src[safe_src] = cross_corr_avg[idx].tolist()
-
-            if pool_by_src:
-                log_bar(
-                    f"3_influence/pool_corr_by_source/{ck_name}",
-                    xaxis=pool_labels,
-                    series={s: _score_histogram_bars(np.array(v), bins=40)[1] for s, v in pool_by_src.items() if v},
-                )
-            if cross_by_src:
-                log_bar(
-                    f"3_influence/cross_corr_by_source/{ck_name}",
-                    xaxis=cross_labels,
-                    series={s: _score_histogram_bars(np.array(v), bins=40)[1] for s, v in cross_by_src.items()},
-                )
-
 
 def _log_score_vs_selfvar_scatter(
-    scores_arr: np.ndarray,
     cross_cov_arr: np.ndarray,
     pool_seq_loss: np.ndarray,
-    query_seq_loss: np.ndarray,
     ck_name: str,
+    *,
+    max_points: int = 300,
 ) -> None:
-    """Cross-cov (influence) vs self-variance: distinguish real influence from noise.
-
-    X = pool sample loss variance over draws (self-var)
-    Y = cross-cov with query set (influence score)
-    If high influence is just due to high variance, it's noise, not signal.
-    Color by score rank: top-20 red, bottom-20 blue, rest gray.
-    """
+    """Cross-cov (influence) vs self-variance: distinguish real influence from noise."""
     pool_var = pool_seq_loss.var(axis=0)
-    query_mean = query_seq_loss.mean(axis=0)
-    n = len(scores_arr)
-    max_pts = min(300, n)
+    n = len(cross_cov_arr)
+    max_pts = min(max_points, n)
     if n > max_pts:
         rng = np.random.RandomState(42)
         idx = np.sort(rng.choice(n, max_pts, replace=False))
@@ -1054,16 +1153,6 @@ def _log_score_vs_selfvar_scatter(
         },
     )
 
-    loss_mean = pool_seq_loss.mean(axis=0)
-    log_scatter(
-        f"2_scores/cross_cov_vs_mean_loss/{ck_name}",
-        xaxis_name="pool_mean_loss",
-        yaxis_name="cross_cov_avg_over_queries",
-        series={
-            "samples": [(float(loss_mean[i]), float(cross_cov_arr[i])) for i in idx],
-        },
-    )
-
 
 def _log_cross_cov_heatmap(
     cross_corr_matrix: np.ndarray,
@@ -1071,12 +1160,15 @@ def _log_cross_cov_heatmap(
     query_ids: list,
     ck_name: str,
     pool_sources: list | None = None,
+    *,
+    max_pool: int = 50,
+    max_query: int = 20,
 ) -> None:
     """Pool × Query cross-correlation heatmap, aggregated by source when available."""
     n_pool = cross_corr_matrix.shape[0]
     n_query = cross_corr_matrix.shape[1]
-    max_query = min(20, n_query)
-    query_labels = [f"q{j}" for j in range(max_query)]
+    max_q = min(max_query, n_query)
+    query_labels = [f"q{j}" for j in range(max_q)]
 
     if pool_sources is not None and len(pool_sources) == n_pool:
         sources = sorted(set(pool_sources))
@@ -1084,10 +1176,10 @@ def _log_cross_cov_heatmap(
         for i in range(n_pool):
             source_to_indices[pool_sources[i]].append(i)
 
-        source_query_mat = np.zeros((len(sources), max_query))
+        source_query_mat = np.zeros((len(sources), max_q))
         for i, src in enumerate(sources):
             idx = source_to_indices[src]
-            source_query_mat[i] = cross_corr_matrix[idx, :max_query].mean(axis=0)
+            source_query_mat[i] = cross_corr_matrix[idx, :max_q].mean(axis=0)
 
         source_mean_corr = source_query_mat.mean(axis=1)
         sorted_idx = np.argsort(-source_mean_corr)
@@ -1102,13 +1194,13 @@ def _log_cross_cov_heatmap(
             value_label="mean_cross_corr",
         )
     else:
-        max_pool = min(50, n_pool)
-        pool_labels = [f"p{i}" for i in range(max_pool)]
+        max_p = min(max_pool, n_pool)
+        pool_labels = [f"p{i}" for i in range(max_p)]
         log_heatmap(
             f"3_influence/pool_x_query_heatmap/{ck_name}",
             xaxis=query_labels,
             yaxis=pool_labels,
-            matrix=cross_corr_matrix[:max_pool, :max_query],
+            matrix=cross_corr_matrix[:max_p, :max_q],
             value_label="cross_corr",
         )
 
@@ -1176,7 +1268,14 @@ def _log_bif_heatmap_topk(
 
 
 def _log_score_by_source(
-    df: pd.DataFrame, score_col: str, top_k: int, ck_name: str,
+    df: pd.DataFrame,
+    score_col: str,
+    top_k: int,
+    ck_name: str,
+    *,
+    max_sources: int = 20,
+    min_per_source: int = 5,
+    label_max_len: int = 20,
 ) -> None:
     """Score distribution by source + enrichment metrics."""
     if "source" not in df.columns or score_col not in df.columns:
@@ -1188,20 +1287,11 @@ def _log_score_by_source(
     bottomk_src_frac = df.tail(top_k)["source"].fillna("unknown").value_counts(normalize=True)
     pool_src_frac = df["source"].fillna("unknown").value_counts(normalize=True)
     all_sources_sorted = sorted(pool_src_frac.index.tolist())
+    src_labels = [str(s)[:label_max_len] for s in all_sources_sorted]
 
     log_bar(
-        f"3_influence/source_distribution_top{top_k}/{ck_name}",
-        xaxis=[str(s)[:20] for s in all_sources_sorted],
-        series={"top_k": [round(float(topk_src_frac.get(s, 0.0)), 4) for s in all_sources_sorted]},
-    )
-    log_bar(
-        f"3_influence/source_distribution_bottom{top_k}/{ck_name}",
-        xaxis=[str(s)[:20] for s in all_sources_sorted],
-        series={"bottom_k": [round(float(bottomk_src_frac.get(s, 0.0)), 4) for s in all_sources_sorted]},
-    )
-    log_bar(
-        f"3_influence/source_distribution_compare_top{top_k}_vs_bottom{top_k}/{ck_name}",
-        xaxis=[str(s)[:20] for s in all_sources_sorted],
+        f"3_influence/source_distribution/{ck_name}",
+        xaxis=src_labels,
         series={
             "top_k": [round(float(topk_src_frac.get(s, 0.0)), 4) for s in all_sources_sorted],
             "bottom_k": [round(float(bottomk_src_frac.get(s, 0.0)), 4) for s in all_sources_sorted],
@@ -1210,19 +1300,19 @@ def _log_score_by_source(
         stack=False,
     )
 
-    if len(sources) >= 2 and len(sources) <= 20:
+    if len(sources) >= 2 and len(sources) <= max_sources:
         box_data = []
         labels = []
         for src in sources:
             vals = df[df["source"].fillna("unknown") == src][score_col].dropna().values
-            if len(vals) < 5:
+            if len(vals) < min_per_source:
                 continue
             q1, median, q3 = np.percentile(vals, [25, 50, 75])
             iqr = q3 - q1
             lower = max(float(vals.min()), q1 - 1.5 * iqr)
             upper = min(float(vals.max()), q3 + 1.5 * iqr)
             box_data.append([round(lower, 6), round(q1, 6), round(median, 6), round(q3, 6), round(upper, 6)])
-            labels.append(str(src)[:20])
+            labels.append(str(src)[:label_max_len])
 
         if len(box_data) >= 2:
             log_boxplot(
@@ -1231,43 +1321,46 @@ def _log_score_by_source(
                 series={score_col: box_data},
             )
 
-        enrichment_data = {}
-        for src in sources:
-            safe_src = src.replace(" ", "_").replace("/", "_")[:30]
-            t_frac = float(topk_src_frac.get(src, 0))
-            p_frac = float(pool_src_frac.get(src, 0))
-            enrichment_data[f"3_influence/enrichment/{safe_src}"] = (t_frac + 1e-9) / (p_frac + 1e-9)
-        swan_log(enrichment_data)
+        enrichment = [
+            round(
+                (float(topk_src_frac.get(src, 0)) + 1e-9)
+                / (float(pool_src_frac.get(src, 0)) + 1e-9),
+                4,
+            )
+            for src in all_sources_sorted
+        ]
+        log_bar(
+            f"3_influence/enrichment/{ck_name}",
+            xaxis=src_labels,
+            series={"enrichment_ratio": enrichment},
+        )
 
 
-def _log_eigenvalue_spectrum(bif_mat: np.ndarray, ck_name: str) -> None:
+def _log_eigenvalue_spectrum(
+    bif_mat: np.ndarray,
+    ck_name: str,
+    *,
+    max_pool: int = 800,
+    max_ev: int = 20,
+) -> None:
     """Eigenvalue spectrum of BIF matrix: effective dimensionality of influence."""
     n = bif_mat.shape[0]
-    if n > 800:
+    if n > max_pool:
         return
     symmetric = (bif_mat + bif_mat.T) / 2.0
     np.fill_diagonal(symmetric, 0.0)
     try:
         eigenvalues = np.linalg.eigvalsh(symmetric)
         eigenvalues = np.sort(eigenvalues)[::-1]
-        n_ev = min(20, len(eigenvalues))
+        n_ev = min(max_ev, len(eigenvalues))
         ev_labels = [f"ev{i}" for i in range(n_ev)]
+        total_var = float(eigenvalues.sum()) + 1e-12
+        cum_frac = [round(float(eigenvalues[:k].sum()) / total_var, 4) for k in range(1, n_ev + 1)]
         log_bar(
             f"2_scores/eigenvalue_spectrum/{ck_name}",
             xaxis=ev_labels,
-            series={"eigenvalue": [round(v, 6) for v in eigenvalues[:n_ev].tolist()]},
+            series={"eigenvalue": [round(v, 6) for v in eigenvalues[:n_ev].tolist()], "cumulative_frac": cum_frac},
         )
-        total_var = float(eigenvalues.sum())
-        if total_var > 0:
-            top_k_var = [float(eigenvalues[:k].sum()) / total_var for k in [1, 3, 5, 10]]
-            swan_log(
-                {
-                    "2_scores/top1_ev_variance_ratio": top_k_var[0],
-                    "2_scores/top3_ev_variance_ratio": top_k_var[1],
-                    "2_scores/top5_ev_variance_ratio": top_k_var[2],
-                    "2_scores/top10_ev_variance_ratio": top_k_var[3],
-                },
-            )
     except Exception:
         pass
 
@@ -1276,11 +1369,16 @@ def _log_convergence(
     pool_seq_loss: np.ndarray,
     num_chains: int,
     ck_name: str,
+    *,
+    checkpoints: list[int] | None = None,
+    min_draws: int = 3,
 ) -> None:
     """BIF score convergence: native swanlab.log time-series vs n_draws."""
     total_draws = pool_seq_loss.shape[0]
-    checkpoints = sorted(set([5, 10, 20, 30, 50, 80, 100, 150, 200] + [total_draws]))
-    checkpoints = [c for c in checkpoints if c <= total_draws and c >= 3]
+    if checkpoints is None:
+        checkpoints = [5, 10, 20, 30, 50, 80, 100, 150, 200]
+    checkpoints = sorted(set(checkpoints + [total_draws]))
+    checkpoints = [c for c in checkpoints if c <= total_draws and c >= min_draws]
     if len(checkpoints) < 2:
         return
 
@@ -1302,20 +1400,22 @@ def _log_rhat(
     pool_seq_loss: np.ndarray,
     num_chains: int,
     ck_name: str,
-    ck_step: int,
+    *,
+    max_samples: int = 50,
+    min_draws: int = 5,
 ) -> None:
     """Gelman-Rubin R-hat: are chains converged? R-hat < 1.1 means OK."""
     if num_chains < 2:
         return
     draws_per_chain = pool_seq_loss.shape[0] // num_chains
-    if draws_per_chain < 5:
+    if draws_per_chain < min_draws:
         return
 
     n_samples = pool_seq_loss.shape[1]
-    max_samples = min(50, n_samples)
+    max_s = min(max_samples, n_samples)
 
     rhat_values = []
-    for s in range(max_samples):
+    for s in range(max_s):
         chains_data = []
         for c in range(num_chains):
             chain_loss = pool_seq_loss[c * draws_per_chain:(c + 1) * draws_per_chain, s]
@@ -1339,54 +1439,17 @@ def _log_rhat(
         return
 
     rhat_arr = np.array(rhat_values)
-    swan_log(
-        {
-            "1_diag/rhat/mean": float(rhat_arr.mean()),
-            "1_diag/rhat/max": float(rhat_arr.max()),
-            "1_diag/rhat/frac_below_1.1": float((rhat_arr < 1.1).mean()),
-            "1_diag/rhat/frac_below_1.2": float((rhat_arr < 1.2).mean()),
+    log_bar(
+        f"1_diag/rhat/{ck_name}",
+        xaxis=["mean", "max", "frac<1.1", "frac<1.2"],
+        series={
+            "rhat": [
+                round(float(rhat_arr.mean()), 4),
+                round(float(rhat_arr.max()), 4),
+                round(float((rhat_arr < 1.1).mean()), 4),
+                round(float((rhat_arr < 1.2).mean()), 4),
+            ],
         },
-        step=ck_step,
-    )
-
-
-def _log_chain_consistency(
-    pool_seq_loss: np.ndarray,
-    num_chains: int,
-    full_scores: np.ndarray,
-    ck_name: str,
-    ck_step: int,
-) -> None:
-    """Inter-chain Spearman correlation of BIF rankings."""
-    draws_per_chain = pool_seq_loss.shape[0] // num_chains
-    if draws_per_chain < 3:
-        return
-
-    chain_scores = []
-    for c in range(num_chains):
-        chain_loss = pool_seq_loss[c * draws_per_chain:(c + 1) * draws_per_chain]
-        try:
-            chain_bif = compute_bif_pairwise(chain_loss, num_chains=1, reduce_chains="stack")
-            np.fill_diagonal(chain_bif, 0.0)
-            chain_scores.append(chain_bif.mean(axis=1))
-        except Exception:
-            return
-
-    if len(chain_scores) < 2:
-        return
-
-    spearman_pairs = []
-    for i in range(len(chain_scores)):
-        for j in range(i + 1, len(chain_scores)):
-            sp = spearman_from_scores(chain_scores[i], chain_scores[j])
-            spearman_pairs.append(sp)
-
-    swan_log(
-        {
-            "1_diag/chain_spearman/mean": float(np.mean(spearman_pairs)),
-            "1_diag/chain_spearman/min": float(np.min(spearman_pairs)),
-        },
-        step=ck_step,
     )
 
 
@@ -1395,12 +1458,15 @@ def _log_chain_scatter(
     num_chains: int,
     scores_arr: np.ndarray,
     ck_name: str,
+    *,
+    max_points: int = 300,
+    min_draws: int = 3,
 ) -> None:
     """Each chain's score vs mean-of-other-chains — scales to N chains."""
     if num_chains < 2:
         return
     draws_per_chain = pool_seq_loss.shape[0] // num_chains
-    if draws_per_chain < 3:
+    if draws_per_chain < min_draws:
         return
 
     chain_scores = []
@@ -1414,11 +1480,11 @@ def _log_chain_scatter(
             return
 
     chain_scores_arr = np.array(chain_scores)
-    max_points = 300
     n = chain_scores_arr.shape[1]
-    if n > max_points:
+    max_pts = min(max_points, n)
+    if n > max_pts:
         rng = np.random.RandomState(42)
-        idx = np.sort(rng.choice(n, max_points, replace=False))
+        idx = np.sort(rng.choice(n, max_pts, replace=False))
     else:
         idx = np.arange(n)
 
@@ -1435,11 +1501,47 @@ def _log_chain_scatter(
         )
 
 
+def _log_rank_stability(
+    names: list[str], score_vecs: dict[str, np.ndarray],
+) -> None:
+    """Spearman correlation heatmap: rank stability across checkpoints."""
+    n = len(names)
+    mat = np.zeros((n, n), dtype=np.float64)
+    for i, a in enumerate(names):
+        for j, b in enumerate(names):
+            mat[i, j] = spearman_from_scores(score_vecs[a], score_vecs[b])
+    log_heatmap(
+        "4_2_influence/rank_stability_spearman",
+        xaxis=names,
+        yaxis=names,
+        matrix=mat,
+        value_label="Spearman ρ",
+    )
+
+
+def _log_topk_overlap(
+    names: list[str], score_vecs: dict[str, np.ndarray], top_k: int,
+) -> None:
+    """Top-K overlap heatmap across checkpoints."""
+    n = len(names)
+    k = min(top_k, len(next(iter(score_vecs.values()))))
+    mat = np.zeros((n, n), dtype=np.float64)
+    for i, a in enumerate(names):
+        for j, b in enumerate(names):
+            mat[i, j] = topk_overlap(score_vecs[a], score_vecs[b], k=k)
+    log_heatmap(
+        f"4_2_influence/top{k}_overlap",
+        xaxis=names,
+        yaxis=names,
+        matrix=mat,
+        value_label="overlap_ratio",
+    )
+
+
 def _global_analysis(
     out_dir: str,
     names: list[str],
-    score_col: str,
-    top_k: int,
+    acfg: AnalyzeConfig,
     summary_rows: list[dict[str, Any]],
     pool_df: pd.DataFrame | None = None,
 ) -> None:
@@ -1452,14 +1554,31 @@ def _global_analysis(
         csv_path = f"{out_dir}/{ck_name}/pool_scores.csv"
         df = pd.read_csv(csv_path)
         per_ckpt_df[ck_name] = df
-        score_vecs[ck_name] = df[score_col].to_numpy()
-        per_ckpt_top[ck_name] = df.head(top_k).copy()
+        score_vecs[ck_name] = df[acfg.score_col].to_numpy()
+        per_ckpt_top[ck_name] = df.head(acfg.top_k).copy()
 
-    traj_df = make_global_trajectory_df(per_ckpt_df, score_col)
+    if len(names) > 1:
+        pair_rows = []
+        for i, a in enumerate(names):
+            for j, b in enumerate(names):
+                if j <= i:
+                    continue
+                k = min(acfg.top_k, len(score_vecs[a]))
+                pair_rows.append({
+                    "checkpoint_a": a,
+                    "checkpoint_b": b,
+                    "spearman": spearman_from_scores(score_vecs[a], score_vecs[b]),
+                    f"top{k}_overlap": topk_overlap(score_vecs[a], score_vecs[b], k=k),
+                })
+        pd.DataFrame(pair_rows).to_csv(
+            f"{out_dir}/pairwise_stability.csv", index=False
+        )
+
+    traj_df = make_global_trajectory_df(per_ckpt_df, acfg.score_col)
     traj_df = traj_df.sort_values("traj_mean", ascending=False).reset_index(drop=True)
     traj_df.to_csv(f"{out_dir}/trajectory_scores.csv", index=False)
 
-    _log_sample_table(traj_df, names, score_col, top_k, pool_df=pool_df)
+    _log_sample_table(traj_df, names, acfg.score_col, acfg.top_k, pool_df=pool_df)
 
     for ck_idx, ck_name in enumerate(names):
         ck_col = f"score__{ck_name}"
@@ -1467,10 +1586,10 @@ def _global_analysis(
             swan_log(
                 {
                     "4_2_influence/trajectory/topk_mean": float(
-                        traj_df.head(top_k)[ck_col].mean()
+                        traj_df.head(acfg.top_k)[ck_col].mean()
                     ),
                     "4_2_influence/trajectory/topk_std": float(
-                        traj_df.head(top_k)[ck_col].std()
+                        traj_df.head(acfg.top_k)[ck_col].std()
                     ),
                 },
                 step=ck_idx,
@@ -1518,21 +1637,25 @@ def _global_analysis(
             )
 
     if len(names) > 1:
+        _log_rank_stability(names, score_vecs)
+        _log_topk_overlap(names, score_vecs, acfg.top_k)
+
+        top_n = acfg.trajectory_top_n
         top_series = _trajectory_stats_series(
-            traj_df, names, sort_by="traj_mean", top_n=20
+            traj_df, names, sort_by="traj_mean", top_n=top_n
         )
         log_line(
-            "4_2_influence/trajectory/top20_by_mean",
+            "4_2_influence/trajectory/top_by_mean",
             xaxis=names,
             series=top_series,
             smooth=True,
         )
 
         emergent_series = _trajectory_stats_series(
-            traj_df, names, sort_by="emergence_last_minus_first", top_n=20
+            traj_df, names, sort_by="emergence_last_minus_first", top_n=top_n
         )
         log_line(
-            "4_2_influence/trajectory/top20_emergent",
+            "4_2_influence/trajectory/top_emergent",
             xaxis=names,
             series=emergent_series,
             smooth=True,
@@ -1550,7 +1673,7 @@ def _global_analysis(
     source_rows = []
     for ck in names:
         cur = per_ckpt_df[ck]
-        top = cur.head(top_k)
+        top = cur.head(acfg.top_k)
         top_counts = top["source"].fillna("unknown").value_counts(normalize=True)
         all_counts = cur["source"].fillna("unknown").value_counts(normalize=True)
         all_sources = sorted(
@@ -1574,30 +1697,49 @@ def _global_analysis(
     )
 
 
+def _auto_adapt_from_first_checkpoint(
+    acfg: AnalyzeConfig,
+    all_ckpts: list[tuple[str, str]],
+    pool_df: pd.DataFrame | None,
+) -> None:
+    """Peek at the first checkpoint's trace dims to auto-adapt config."""
+    for ck_name, ck_dir in all_ckpts[:1]:
+        try:
+            loaded = load_checkpoint_traces(ck_dir)
+        except Exception:
+            continue
+        pool_size = loaded["pool_seq_loss"].shape[1]
+        query_size = loaded["query_seq_loss"].shape[1]
+        num_draws = loaded["pool_seq_loss"].shape[0]
+        num_chains = loaded.get("num_chains", 1)
+        num_sources = 0
+        if pool_df is not None and "source" in pool_df.columns:
+            num_sources = pool_df["source"].nunique()
+        elif "source_type" in loaded.get("pool_meta", {}):
+            num_sources = len(set(loaded["pool_meta"]["source_type"]) - {None})
+        _auto_adapt_config(
+            acfg,
+            pool_size=pool_size,
+            query_size=query_size,
+            num_draws=num_draws,
+            num_chains=num_chains,
+            num_sources=num_sources,
+        )
+        break
+
+
 def analyze_bif_results(
     bif_root: str,
     out_dir: str,
-    score_col: str = "bif_mean",
-    top_k: int = 500,
-    save_full_query_matrix: bool = False,
+    acfg: AnalyzeConfig | None = None,
     experiment_name: str | None = None,
     run_name: str | None = None,
     manage_tracking: bool = True,
-    negate_scores: bool = False,
 ) -> None:
+    if acfg is None:
+        acfg = AnalyzeConfig()
     rank, world_size = _get_dist_context()
     ensure_dir(out_dir)
-
-    if rank == 0 and manage_tracking:
-        auto_name = make_analyze_name(
-            guess_model_tag(bif_root), score_col, top_k,
-        )
-        init_run(
-            experiment_name=experiment_name or auto_name,
-            run_name=run_name,
-            config={"bif_root": bif_root, "score_col": score_col, "top_k": top_k},
-            tags=["analysis"],
-        )
 
     all_ckpts = discover_checkpoint_dirs(bif_root)
     names = [x[0] for x in all_ckpts]
@@ -1627,6 +1769,19 @@ def analyze_bif_results(
                     pool_df = pd.DataFrame(read_jsonl(_pool_jsonl))
                     break
 
+    _auto_adapt_from_first_checkpoint(acfg, all_ckpts, pool_df)
+
+    if rank == 0 and manage_tracking:
+        auto_name = make_analyze_name(
+            guess_model_tag(bif_root), acfg.score_col, acfg.top_k or 500,
+        )
+        init_run(
+            experiment_name=experiment_name or auto_name,
+            run_name=run_name,
+            config={"bif_root": bif_root, **{k: v for k, v in acfg.__dict__.items() if v is not None}},
+            tags=["analysis"],
+        )
+
     assigned = all_ckpts[rank::world_size]
     summary_rows_local: list[dict[str, Any]] = []
     for ck_name, ck_dir in assigned:
@@ -1635,11 +1790,8 @@ def analyze_bif_results(
             ck_name,
             ck_dir,
             out_dir,
-            score_col,
-            top_k,
-            save_full_query_matrix,
+            acfg,
             ck_step=ck_step,
-            negate_scores=negate_scores,
             pool_df=pool_df,
         )
         summary_rows_local.append(row)
@@ -1665,8 +1817,8 @@ def analyze_bif_results(
             summary_rows.append(
                 {
                     "checkpoint": ck_name,
-                    "score_mean": float(df[score_col].mean()),
-                    "score_std": float(df[score_col].std()),
+                    "score_mean": float(df[acfg.score_col].mean()),
+                    "score_std": float(df[acfg.score_col].std()),
                     "num_draws": int(meta.get("num_draws", 0)),
                     "pool_size": len(df),
                 }
@@ -1674,15 +1826,14 @@ def analyze_bif_results(
             valid_names.append(ck_name)
 
         _global_analysis(
-            out_dir, valid_names, score_col, top_k, summary_rows, pool_df=pool_df
+            out_dir, valid_names, acfg, summary_rows, pool_df=pool_df
         )
 
         save_json(
             f"{out_dir}/analysis_config.json",
             {
                 "bif_root": bif_root,
-                "score_col": score_col,
-                "top_k": top_k,
+                **{k: v for k, v in acfg.__dict__.items()},
                 "checkpoint_names": names,
                 "world_size": world_size,
             },
@@ -1702,21 +1853,39 @@ def main() -> None:
     )
     parser.add_argument("--bif_root", required=True)
     parser.add_argument("--out_dir", required=True)
-    parser.add_argument("--score_col", default="bif_mean")
-    parser.add_argument("--top_k", type=int, default=500)
+    parser.add_argument("--score_col", default=None)
+    parser.add_argument("--top_k", type=int, default=None)
     parser.add_argument("--save_full_query_matrix", action="store_true")
+    parser.add_argument("--negate_scores", action="store_true")
+    parser.add_argument("--hist_bins", type=int, default=None)
+    parser.add_argument("--scatter_max_points", type=int, default=None)
+    parser.add_argument("--trajectory_top_n", type=int, default=None)
     parser.add_argument("--experiment_name", default=None)
     parser.add_argument("--run_name", default=None)
     args = parser.parse_args()
+
+    acfg = AnalyzeConfig()
+    if args.score_col is not None:
+        acfg.score_col = args.score_col
+    if args.top_k is not None:
+        acfg.top_k = args.top_k
+    if args.save_full_query_matrix:
+        acfg.save_full_query_matrix = True
+    if args.negate_scores:
+        acfg.negate_scores = True
+    if args.hist_bins is not None:
+        acfg.hist_bins = args.hist_bins
+    if args.scatter_max_points is not None:
+        acfg.scatter_max_points = args.scatter_max_points
+    if args.trajectory_top_n is not None:
+        acfg.trajectory_top_n = args.trajectory_top_n
 
     _init_dist_if_needed()
     try:
         analyze_bif_results(
             bif_root=args.bif_root,
             out_dir=args.out_dir,
-            score_col=args.score_col,
-            top_k=args.top_k,
-            save_full_query_matrix=args.save_full_query_matrix,
+            acfg=acfg,
             experiment_name=args.experiment_name,
             run_name=args.run_name,
         )
