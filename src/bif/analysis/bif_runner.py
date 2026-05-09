@@ -583,7 +583,9 @@ def run_bif(
         query_token_losses: list[torch.Tensor] = []
 
         total_steps = sgld_cfg.num_burnin_steps + sgld_cfg.draws_per_chain * sgld_cfg.num_steps_bw_draws
+        num_burnin_draws = sgld_cfg.num_burnin_steps // sgld_cfg.num_steps_bw_draws
         draw_count = 0
+        burnin_draw_count = 0
         grad_accum = sgld_cfg.gradient_accumulation_steps
         steps_since_draw = sgld_cfg.num_steps_bw_draws
 
@@ -618,9 +620,9 @@ def run_bif(
 
                 if torch.isnan(pool_seq).any() or torch.isnan(query_seq).any():
                     logger.warning(
-                        "NaN detected at burn-in step %d (chain %d). "
+                        "NaN detected at burn-in draw %d (step %d, chain %d). "
                         "SGLD diverged — stopping this chain early.",
-                        step, chain_id if single_chain_mode else rank,
+                        burnin_draw_count, step, chain_id if single_chain_mode else rank,
                     )
                     break
 
@@ -631,8 +633,9 @@ def run_bif(
                             f"4_1_bif/chain{chain_id}/query_loss_mean": float(query_seq.mean()),
                             f"4_1_bif/chain{chain_id}/is_burnin": 1,
                         },
-                        step=step,
+                        step=burnin_draw_count,
                     )
+                burnin_draw_count += 1
 
             if is_draw_step:
                 steps_since_draw = 0
@@ -642,9 +645,9 @@ def run_bif(
 
                 if torch.isnan(pool_seq).any() or torch.isnan(query_seq).any():
                     logger.warning(
-                        "NaN detected at step %d (chain %d). "
+                        "NaN detected at draw %d (step %d, chain %d). "
                         "SGLD diverged — stopping this chain early.",
-                        step, chain_id if single_chain_mode else rank,
+                        draw_count, step, chain_id if single_chain_mode else rank,
                     )
                     break
 
@@ -661,6 +664,7 @@ def run_bif(
                 )
 
                 if rank == 0:
+                    draw_idx = num_burnin_draws + draw_count - 1
                     with torch.no_grad():
                         param_dist_sq = sum(
                             (p.data - anchor_params[n]).float().norm().item() ** 2
@@ -674,7 +678,7 @@ def run_bif(
                             f"4_1_bif/chain{chain_id}/param_dist_from_anchor": param_dist,
                             f"4_1_bif/chain{chain_id}/is_burnin": 0,
                         },
-                        step=step,
+                        step=draw_idx,
                     )
 
             if rank == 0:
