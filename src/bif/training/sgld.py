@@ -177,7 +177,7 @@ class LocalizedSGLDSampler:
 
     def _compute_nbeta(self) -> float:
         cfg = self.cfg
-        if cfg.nbeta > 0:
+        if cfg.nbeta >= 0:
             return cfg.nbeta
         if cfg.nbeta_mode == "devinterp":
             bs = max(self.effective_batch_size, 2)
@@ -350,7 +350,7 @@ class RMSpropSGLDSampler:
 
     def _compute_nbeta(self) -> float:
         cfg = self.cfg
-        if cfg.nbeta > 0:
+        if cfg.nbeta >= 0:
             return cfg.nbeta
         if cfg.nbeta_mode == "devinterp":
             bs = max(self.effective_batch_size, 2)

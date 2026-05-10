@@ -31,8 +31,8 @@ class SGLDConfig:
     lr: float = 5e-6
     gamma: float = 1e-3
     beta: float = 1.0
+    nbeta: float = -1.0
     nbeta_mode: str = "devinterp"
-    nbeta: float = 0.0
     noise_level: float = 1.0
     num_chains: int = 4
     draws_per_chain: int = 60

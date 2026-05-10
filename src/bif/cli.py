@@ -219,7 +219,7 @@ def main() -> None:
     p_run.add_argument("--gamma", type=float, default=1e-3)
     p_run.add_argument("--beta", type=float, default=1.0)
     p_run.add_argument("--nbeta_mode", type=str, default="devinterp", choices=["devinterp", "dataset"])
-    p_run.add_argument("--nbeta", type=float, default=0.0)
+    p_run.add_argument("--nbeta", type=float, default=-1.0)
     p_run.add_argument("--noise_level", type=float, default=1.0)
     p_run.add_argument("--num_burnin_steps", type=int, default=0)
     p_run.add_argument("--num_steps_bw_draws", type=int, default=1)
@@ -252,6 +252,10 @@ def main() -> None:
     )
     p_run.add_argument(
         "--dtype", default="float32", choices=["float32", "float16", "bfloat16"]
+    )
+    p_run.add_argument(
+        "--device", default=None,
+        help="Compute device (e.g. 'cuda', 'cuda:0', 'cpu'). Auto-detected if not set.",
     )
     p_run.add_argument(
         "--experiment_name",
@@ -662,7 +666,7 @@ def main() -> None:
         _argv += ["--gamma", str(args.gamma)]
         _argv += ["--beta", str(args.beta)]
         _argv += ["--nbeta_mode", str(args.nbeta_mode)]
-        if getattr(args, "nbeta", 0.0) > 0:
+        if getattr(args, "nbeta", -1.0) >= 0:
             _argv += ["--nbeta", str(args.nbeta)]
         _argv += ["--noise_level", str(args.noise_level)]
         _argv += ["--num_burnin_steps", str(args.num_burnin_steps)]
@@ -679,6 +683,8 @@ def main() -> None:
         if args.chain_id is not None:
             _argv += ["--chain_id", str(args.chain_id)]
         _argv += ["--dtype", args.dtype]
+        if getattr(args, "device", None) is not None:
+            _argv += ["--device", args.device]
         if args.checkpoints is not None:
             _argv += ["--checkpoints", args.checkpoints]
         if args.experiment_name is not None:

@@ -564,7 +564,7 @@ def run_bif(
 
     if rank == 0:
         _effective_bs = train_batch_size * max(sgld_cfg.batches_per_draw, 1) * sgld_cfg.gradient_accumulation_steps
-        if sgld_cfg.nbeta > 0:
+        if sgld_cfg.nbeta >= 0:
             _nbeta_val = sgld_cfg.nbeta
         elif sgld_cfg.nbeta_mode == "devinterp":
             _nbeta_val = _effective_bs / math.log(max(_effective_bs, 2))

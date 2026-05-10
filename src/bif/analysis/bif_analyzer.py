@@ -980,6 +980,8 @@ def _process_one_checkpoint(
             pool_sources=df["source"].fillna("unknown").tolist() if "source" in df.columns else None,
             max_pool=acfg.heatmap_max_pool,
             max_query=acfg.heatmap_max_query,
+            query_sources=loaded.get("query_meta", {}).get("source_types"),
+            query_task_types=loaded.get("query_meta", {}).get("task_types"),
         )
         _log_bif_heatmap_topk(
             bif_mat, df, loaded["pool_ids"], acfg.top_k, ck_name,
@@ -1169,12 +1171,15 @@ def _log_cross_cov_heatmap(
     max_pool: int = 50,
     max_query: int = 20,
     query_bar_limit: int = 30,
+    query_sources: list | None = None,
+    query_task_types: list | None = None,
 ) -> None:
     """Query sensitivity: which queries are most/least influenced by pool data.
 
-    When query count <= query_bar_limit, shows per-query bar chart.
-    When query count > query_bar_limit, shows top-K / bottom-K bars + histogram
-    of query sensitivities (avoids overcrowded x-axis).
+    Always shows:
+    1. Histogram of query sensitivity distribution (scales to any count)
+    2. Top-K / Bottom-K bar chart with meaningful query IDs
+    3. Per-source-group aggregation (if query metadata available)
     """
     n_pool = cross_corr_matrix.shape[0]
     n_query = cross_corr_matrix.shape[1]
@@ -1182,48 +1187,90 @@ def _log_cross_cov_heatmap(
     pool_mean_per_query = cross_corr_matrix[:, :n_query].mean(axis=0)
     pool_std_per_query = cross_corr_matrix[:, :n_query].std(axis=0)
 
-    if n_query <= query_bar_limit:
-        query_labels = [f"q{j}" for j in range(n_query)]
-        log_bar(
-            f"3_influence/query_sensitivity/{ck_name}",
-            xaxis=query_labels,
-            series={
-                "mean_cross_corr": [round(float(v), 4) for v in pool_mean_per_query],
-                "std_cross_corr": [round(float(v), 4) for v in pool_std_per_query],
-            },
-        )
+    def _make_query_label(idx: int) -> str:
+        if query_ids and idx < len(query_ids):
+            sid = str(query_ids[idx])
+            if len(sid) > 18:
+                sid = sid[:8] + ".." + sid[-6:]
+            return sid
+        return f"q{idx}"
+
+    sorted_idx = np.argsort(-pool_mean_per_query)
+    n_head = min(10, n_query)
+    n_tail = min(10, n_query)
+    head_idx = sorted_idx[:n_head]
+    tail_idx = sorted_idx[-n_tail:]
+
+    if n_query <= n_head + n_tail + 3:
+        all_labels = [_make_query_label(i) for i in sorted_idx]
+        all_means = [round(float(pool_mean_per_query[i]), 4) for i in sorted_idx]
+        all_stds = [round(float(pool_std_per_query[i]), 4) for i in sorted_idx]
     else:
-        sorted_idx = np.argsort(-pool_mean_per_query)
-        n_head = min(10, n_query)
-        n_tail = min(10, n_query)
-        head_idx = sorted_idx[:n_head]
-        tail_idx = sorted_idx[-n_tail:]
-
-        head_labels = [f"q{i}(#{rank+1})" for rank, i in enumerate(head_idx)]
-        tail_labels = [f"q{i}(#{n_query-n_tail+rank+1})" for rank, i in enumerate(tail_idx)]
+        head_labels = [_make_query_label(i) + f"(#{r+1})" for r, i in enumerate(head_idx)]
+        tail_labels = [_make_query_label(i) + f"(#{n_query-n_tail+r+1})" for r, i in enumerate(tail_idx)]
         all_labels = head_labels + ["..."] + tail_labels
-        head_vals = list(pool_mean_per_query[head_idx])
-        tail_vals = list(pool_mean_per_query[tail_idx])
-        all_means = [round(float(v), 4) for v in head_vals] + [None] + [round(float(v), 4) for v in tail_vals]
-        head_stds = list(pool_std_per_query[head_idx])
-        tail_stds = list(pool_std_per_query[tail_idx])
-        all_stds = [round(float(v), 4) for v in head_stds] + [None] + [round(float(v), 4) for v in tail_stds]
+        all_means = [round(float(pool_mean_per_query[i]), 4) for i in head_idx] + [None] + [round(float(pool_mean_per_query[i]), 4) for i in tail_idx]
+        all_stds = [round(float(pool_std_per_query[i]), 4) for i in head_idx] + [None] + [round(float(pool_std_per_query[i]), 4) for i in tail_idx]
 
-        log_bar(
-            f"3_influence/query_sensitivity_top_bottom/{ck_name}",
-            xaxis=all_labels,
-            series={
-                "mean_cross_corr": all_means,
-                "std_cross_corr": all_stds,
-            },
-        )
+    log_bar(
+        f"3_influence/query_sensitivity/{ck_name}",
+        xaxis=all_labels,
+        series={
+            "mean_cross_corr": all_means,
+            "std_cross_corr": all_stds,
+        },
+    )
 
-        labels_hist, counts_hist = _score_histogram_bars(pool_mean_per_query, bins=min(40, max(10, n_query // 5)))
-        log_bar(
-            f"3_influence/query_sensitivity_distribution/{ck_name}",
-            xaxis=labels_hist,
-            series={"count": counts_hist},
-        )
+    labels_hist, counts_hist = _score_histogram_bars(
+        pool_mean_per_query, bins=min(40, max(10, n_query // 5))
+    )
+    log_bar(
+        f"3_influence/query_sensitivity_distribution/{ck_name}",
+        xaxis=labels_hist,
+        series={"count": counts_hist},
+    )
+
+    if query_sources is not None and len(query_sources) == n_query:
+        sources = sorted(set(query_sources))
+        if len(sources) > 1:
+            src_means = []
+            src_stds = []
+            src_labels = []
+            for src in sources:
+                mask = [i for i, s in enumerate(query_sources) if s == src]
+                vals = pool_mean_per_query[mask]
+                src_labels.append(str(src)[:20])
+                src_means.append(round(float(vals.mean()), 4))
+                src_stds.append(round(float(vals.std()), 4))
+            log_bar(
+                f"3_influence/query_sensitivity_by_source/{ck_name}",
+                xaxis=src_labels,
+                series={
+                    "mean_cross_corr": src_means,
+                    "std_cross_corr": src_stds,
+                },
+            )
+
+    if query_task_types is not None and len(query_task_types) == n_query:
+        tasks = sorted(set(t for t in query_task_types if t is not None))
+        if len(tasks) > 1:
+            task_means = []
+            task_stds = []
+            task_labels = []
+            for t in tasks:
+                mask = [i for i, tt in enumerate(query_task_types) if tt == t]
+                vals = pool_mean_per_query[mask]
+                task_labels.append(str(t)[:20])
+                task_means.append(round(float(vals.mean()), 4))
+                task_stds.append(round(float(vals.std()), 4))
+            log_bar(
+                f"3_influence/query_sensitivity_by_task/{ck_name}",
+                xaxis=task_labels,
+                series={
+                    "mean_cross_corr": task_means,
+                    "std_cross_corr": task_stds,
+                },
+            )
 
     if pool_sources is not None and len(pool_sources) == n_pool:
         sources = sorted(set(pool_sources))
@@ -1237,25 +1284,19 @@ def _log_cross_cov_heatmap(
         ])
         inter_source_std = src_query_mat.std(axis=0)
 
-        if n_query <= query_bar_limit:
-            query_labels = [f"q{j}" for j in range(n_query)]
-            log_bar(
-                f"3_influence/query_sensitivity_source_spread/{ck_name}",
-                xaxis=query_labels,
-                series={"inter_source_std": [round(float(v), 6) for v in inter_source_std]},
-            )
-        else:
-            labels_hist, counts_hist = _score_histogram_bars(inter_source_std, bins=min(30, max(10, n_query // 10)))
-            log_bar(
-                f"3_influence/query_sensitivity_source_spread_dist/{ck_name}",
-                xaxis=labels_hist,
-                series={"count": counts_hist},
-            )
+        labels_hist2, counts_hist2 = _score_histogram_bars(
+            inter_source_std, bins=min(30, max(10, n_query // 10))
+        )
+        log_bar(
+            f"3_influence/query_sensitivity_source_spread/{ck_name}",
+            xaxis=labels_hist2,
+            series={"count": counts_hist2},
+        )
     else:
         max_p = min(max_pool, n_pool)
         max_q = min(max_query, n_query)
         pool_labels = [f"p{i}" for i in range(max_p)]
-        query_labels = [f"q{j}" for j in range(max_q)]
+        query_labels = [_make_query_label(j) for j in range(max_q)]
         log_heatmap(
             f"3_influence/pool_x_query_heatmap/{ck_name}",
             xaxis=query_labels,
