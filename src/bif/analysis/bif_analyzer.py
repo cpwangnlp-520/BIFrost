@@ -184,9 +184,25 @@ def discover_checkpoint_dirs(root: str) -> list[tuple[str, str]]:
         )
         if has_chains:
             entries = [("final_model", root)]
+        else:
+            for name in sorted(os.listdir(root)):
+                full = os.path.join(root, name)
+                if not os.path.isdir(full):
+                    continue
+                has_chains_sub = any(
+                    os.path.isdir(os.path.join(full, d))
+                    and re.fullmatch(r"chain_\d+", d)
+                    for d in os.listdir(full)
+                )
+                if has_chains_sub:
+                    entries.append((name, full))
     entries.sort(key=lambda x: _checkpoint_sort_key(x[0]))
     if not entries:
-        raise ValueError(f"No checkpoint dirs under {root}")
+        raise ValueError(
+            f"No checkpoint dirs under {root}\n"
+            f"Expected: dirs named base_model/final_model/checkpoint-N, "
+            f"or dirs containing chain_*/ subdirs, or chain_*/ at root level."
+        )
     return entries
 
 

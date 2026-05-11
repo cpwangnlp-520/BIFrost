@@ -28,7 +28,7 @@ def per_token_causal_lm_loss(
     Returns:
         Per-token loss tensor of shape (batch, seq_len - 1).
     """
-    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
+    log_probs = torch.nn.functional.log_softmax(logits.float(), dim=-1)
     shift_log_probs = log_probs[:, :-1, :]
     shift_input_ids = input_ids[:, 1:, None]
     return -shift_log_probs.gather(dim=-1, index=shift_input_ids)[:, :, 0]
@@ -49,7 +49,7 @@ def per_example_causal_lm_loss(
     Returns:
         Per-example loss tensor of shape (batch,).
     """
-    shift_logits = logits[:, :-1, :].contiguous()
+    shift_logits = logits[:, :-1, :].contiguous().float()
     shift_labels = labels[:, 1:].contiguous()
     valid_mask = shift_labels.ne(ignore_index)
     loss_fct = nn.CrossEntropyLoss(reduction="none", ignore_index=ignore_index)

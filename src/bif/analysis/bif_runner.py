@@ -867,6 +867,13 @@ def run_bif(
                     }
                     obs_data.update(_sgld_draw_summary(chain_id, step))
                     swan_log(obs_data, step=draw_idx)
+                else:
+                    with torch.no_grad():
+                        param_dist_sq = sum(
+                            (p.data - anchor_params[n]).float().norm().item() ** 2
+                            for n, p in sampler.params
+                        )
+                        param_dist = param_dist_sq ** 0.5
 
                 all_draw_pool_means.append(float(pool_seq.mean()))
                 all_draw_query_means.append(float(query_seq.mean()))
