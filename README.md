@@ -1,6 +1,6 @@
 # BIFrost — Bayesian Influence Function
 
-**BIFrost** is a data influence estimation toolkit for LLM fine-tuning. It uses Localized SGLD sampling to score training-pool examples by their influence on a held-out query set, then compares replay strategies (selected / random / none) via schedule experiments.
+**BIFrost** is a data influence estimation toolkit for LLM fine-tuning. It uses Localized SGLD sampling to estimate local Bayesian influence structure over a training pool, then combines those scores with optional query-overlap analysis to decide which data to replay or upweight in the next stage of training.
 
 ---
 
@@ -93,7 +93,7 @@ python -m bif.cli pipeline status --config configs/small_pool_exp.yaml
 | `draws_per_chain` | `60` | Number of samples to draw per chain |
 | `burn_in` | `0` | Number of burn-in steps before collecting draws |
 | `thinning` | `1` | Steps between consecutive draws |
-| `batches_per_draw` | `0` | Mini-batches per SGLD step (0 = full dataset) |
+| `batches_per_draw` | `0` | Fixed observable eval mini-batches per draw (0 = evaluate the full observable dataset) |
 | `lr` | `5e-6` | SGLD learning rate |
 | `gamma` | `1e-3` | Localization strength (prior variance) |
 | `beta` | `1.0` | Inverse temperature |
@@ -108,6 +108,12 @@ The `nbeta` parameter controls gradient scaling in SGLD. Two modes are available
 - **`dataset`**: `nbeta = beta * N` where N is the source dataset size. This is the exact Bayesian interpretation.
 
 These differ significantly — for typical params (β=0.125, N=800, effective_bs=24), devinterp gives nbeta≈7.55 while dataset gives nbeta=100.
+
+Important:
+
+- In `devinterp` mode, `effective_batch_size` means `train_batch_size * gradient_accumulation_steps`.
+- `batches_per_draw` does **not** affect `nbeta`. It only controls how many fixed observable eval mini-batches are scored per draw.
+- `pool_eval_subset` overrides `batches_per_draw` for the pool observable when you want an explicit cap.
 
 ### Included Data Files
 
@@ -176,8 +182,9 @@ steps:
     dtype: bfloat16
 
   analyze-bif:
-    score_col: cross_cov_avg_over_queries
+    score_col: bif_mean
     top_k: 500
+    # enable_aux_query_plots: true
 
   extract-top:
     top_k: 500
@@ -215,15 +222,64 @@ bifrost run-bif \
     --dtype bfloat16
 ```
 
+Key run outputs:
+
+- `run_config.json`: resolved sampler config, computed `nbeta`, sampling effective batch size
+- `chain_*/observable_loss_trace.npz`: pool loss traces used for BIF
+- `chain_*/query_loss_trace.npz`: query loss traces used for auxiliary query-overlap analysis
+- `chain_*/draw_metrics.npz`: per-draw sampler diagnostics
+
+Sampler diagnostics to watch first:
+
+- `scaled_grad_norm` vs `noise_norm`: rough signal-to-noise for the sampler
+- `localization_norm`, `weight_decay_norm`, `prior_norm`: whether the local prior is dominating
+- `distance`: how far the chain drifts from the anchor checkpoint
+- `loss` / `pool_loss_mean` / `query_loss_mean`: obvious divergence or collapse
+
+If these are unstable, do not trust downstream BIF rankings yet.
+
 ### analyze-bif — Compute influence scores
 
 ```bash
 bifrost analyze-bif \
     --bif_root  ./runs/bif_traces \
     --out_dir   ./runs/bif_analysis \
-    --score_col cross_cov_avg_over_queries \
+    --score_col bif_mean \
     --top_k     500
 ```
+
+Optional auxiliary query plots:
+
+```bash
+bifrost analyze-bif \
+    --bif_root  ./runs/bif_traces \
+    --out_dir   ./runs/bif_analysis \
+    --score_col bif_mean \
+    --top_k     500 \
+    --enable_aux_query_plots
+```
+
+Recommended score columns:
+
+- `bif_mean`: primary BIF score. Best default for source / sample ranking.
+- `bif_abs_mean`: useful secondary stability check; high values mean the sample sits in a stronger local correlation structure.
+- `cross_corr_mean_over_queries`: auxiliary query-overlap signal. Useful for targeting a specific query set, but not the BIF primary score.
+
+What the analyzer now prioritizes:
+
+- `core_summary`: per-checkpoint BIF health summary
+- `score_vs_selfvar`: distinguish structurally important samples from merely noisy ones
+- `source_shift`: which sources increasingly dominate top-K through training
+- `source_query_overlap_vs_checkpoint`: source-level average overlap with the query set across checkpoints
+- `source_recommendations.csv`: source-level ranking for next-stage training decisions
+
+What is considered auxiliary:
+
+- large pool×query heatmaps
+- raw query cross-correlation distributions
+- query-overlap scatter plots
+
+These are still available behind `--enable_aux_query_plots`, but they should not replace the core BIF ranking.
 
 ### extract-top — Extract highest-influence samples
 
@@ -256,7 +312,13 @@ bifrost extract-top \
 ├── bif_traces/
 │   └── <checkpoint>/chain_<id>/
 ├── bif_analysis/
-│   └── <checkpoint>/pool_scores.csv
+│   ├── checkpoint_summary.csv
+│   ├── source_enrichment_topk.csv
+│   ├── source_recommendations.csv
+│   └── <checkpoint>/
+│       ├── pool_scores.csv
+│       ├── bif_matrix.npy
+│       └── ckpt_meta.json
 ├── top_samples/
 │   └── top_500_full.jsonl
 ├── schedule_compare/
@@ -265,6 +327,38 @@ bifrost extract-top \
 ```
 
 ---
+
+## How To Use BIF For Data Selection
+
+The analysis is most useful when read in this order:
+
+1. Check sampler health first.
+   Look at loss traces, `R-hat`, `scaled_grad_norm`, `noise_norm`, `prior_norm`, and `distance`.
+   If sampling is unstable, ranking quality is low.
+
+2. Rank sources before ranking individual samples.
+   Use:
+   - `source_recommendations.csv`
+   - `source/shift_topk`
+   - `source/query_overlap_vs_checkpoint`
+
+3. Only then inspect individual top samples inside the best sources.
+   Prefer samples with:
+   - high `bif_mean`
+   - non-trivial `bif_abs_mean`
+   - moderate or low `self_variance`
+   - high `cross_corr_mean_over_queries` only if query targeting is your goal
+
+Practical interpretation:
+
+- If a source has high `bif_mean` and rising `source_shift`, it is a good continuation-training candidate.
+- If a source has high query overlap and also decent BIF, it is a good task-targeted replay candidate.
+- If a source has high query overlap but very high `self_variance`, treat it cautiously; it may be noisy rather than structurally useful.
+
+Source recommendation outputs:
+
+- `bif_training_score`: good default for deciding what to keep training on next.
+- `query_target_score`: better when your objective is explicitly to improve the held-out query/task family.
 
 ## Project Layout
 

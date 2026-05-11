@@ -24,7 +24,7 @@ class SGLDConfig:
         num_steps_bw_draws ← SamplerConfig.num_steps_bw_draws (steps between draws)
         num_burnin_steps   ← SamplerConfig.num_burnin_steps
         weight_decay    ← SamplerConfig.llc_weight_decay (= GaussianPrior.localization, center=None)
-        batches_per_draw   ← sample(batches_per_draw=3) — number of eval batches per observable draw
+        batches_per_draw   ← sample(batches_per_draw=3) — fixed observable mini-batches evaluated per draw
         gradient_accumulation_steps ← sample(gradient_accumulation_steps=1)
     """
 

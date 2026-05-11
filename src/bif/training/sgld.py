@@ -32,12 +32,45 @@ This matches standard AMP practice (Adam in fp32 with bf16 params).
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 
 from bif.config import SGLDConfig
 from bif.training.loss import per_example_causal_lm_loss
+
+
+@dataclass
+class SamplerDiagnostics:
+    loss: float
+    grad_norm: float
+    noise_norm: float
+    scaled_grad_norm: float
+    unscaled_grad_norm: float
+    localization_norm: float
+    weight_decay_norm: float
+    prior_norm: float
+    distance: float
+    dot_grad_prior: float
+    dot_grad_noise: float
+    dot_prior_noise: float
+
+    def as_dict(self) -> dict[str, float]:
+        return {
+            "loss": self.loss,
+            "grad_norm": self.grad_norm,
+            "noise_norm": self.noise_norm,
+            "scaled_grad_norm": self.scaled_grad_norm,
+            "unscaled_grad_norm": self.unscaled_grad_norm,
+            "localization_norm": self.localization_norm,
+            "weight_decay_norm": self.weight_decay_norm,
+            "prior_norm": self.prior_norm,
+            "distance": self.distance,
+            "dot_grad_prior": self.dot_grad_prior,
+            "dot_grad_noise": self.dot_grad_noise,
+            "dot_prior_noise": self.dot_prior_noise,
+        }
 
 
 def _accumulate_gradients(
@@ -187,13 +220,22 @@ class LocalizedSGLDSampler:
     def _sgld_update(
         self,
         step_generator: torch.Generator | None = None,
-    ) -> float:
+    ) -> SamplerDiagnostics:
         lr = self.cfg.lr
         gamma = self.cfg.gamma
         nbeta = self._compute_nbeta()
         noise_level = self.cfg.noise_level
 
+        grad_norm_sq = 0.0
         noise_norm_sq = 0.0
+        scaled_grad_sq = 0.0
+        unscaled_grad_sq = 0.0
+        localization_sq = 0.0
+        weight_decay_sq = 0.0
+        distance_sq = 0.0
+        dot_grad_prior = 0.0
+        dot_grad_noise = 0.0
+        dot_prior_noise = 0.0
         with torch.no_grad():
             for name, p in self.params:
                 if p.grad is None:
@@ -201,23 +243,52 @@ class LocalizedSGLDSampler:
 
                 p_fp32 = self.shadow[name]
                 raw_grad = p.grad.detach().float()
+                grad_norm_sq += raw_grad.norm().item() ** 2
 
                 loss_grad = raw_grad * nbeta
-                prior_grad = gamma * (p_fp32 - self.anchor_params[name])
+                distance_vec = p_fp32 - self.anchor_params[name]
+                prior_grad = gamma * distance_vec
+                localization = 0.5 * lr * prior_grad
+                weight_decay = torch.zeros_like(localization)
                 if self.cfg.weight_decay != 0.0:
                     prior_grad = prior_grad + self.cfg.weight_decay * p_fp32
+                    weight_decay = 0.5 * lr * self.cfg.weight_decay * p_fp32
                 grad = loss_grad + prior_grad
+                scaled_grad = 0.5 * lr * loss_grad
+                prior = localization + weight_decay
 
                 noise = torch.randn(
                     p.shape, device=p.device, dtype=torch.float32,
                     generator=step_generator,
                 )
-                delta = -0.5 * lr * grad + math.sqrt(lr) * noise_level * noise
+                noise_term = math.sqrt(lr) * noise_level * noise
+                delta = -0.5 * lr * grad + noise_term
                 p_fp32.add_(delta)
                 p.copy_(p_fp32)
-                noise_norm_sq += (math.sqrt(lr) * noise_level * noise).norm().item() ** 2
+                noise_norm_sq += noise_term.norm().item() ** 2
+                scaled_grad_sq += scaled_grad.norm().item() ** 2
+                unscaled_grad_sq += scaled_grad.norm().item() ** 2
+                localization_sq += localization.norm().item() ** 2
+                weight_decay_sq += weight_decay.norm().item() ** 2
+                distance_sq += distance_vec.norm().item() ** 2
+                dot_grad_prior += float((scaled_grad * prior).sum().item())
+                dot_grad_noise += float((scaled_grad * noise_term).sum().item())
+                dot_prior_noise += float((prior * noise_term).sum().item())
 
-        return noise_norm_sq
+        return SamplerDiagnostics(
+            loss=0.0,
+            grad_norm=grad_norm_sq ** 0.5,
+            noise_norm=noise_norm_sq ** 0.5,
+            scaled_grad_norm=scaled_grad_sq ** 0.5,
+            unscaled_grad_norm=unscaled_grad_sq ** 0.5,
+            localization_norm=localization_sq ** 0.5,
+            weight_decay_norm=weight_decay_sq ** 0.5,
+            prior_norm=(localization_sq + weight_decay_sq) ** 0.5,
+            distance=distance_sq ** 0.5,
+            dot_grad_prior=dot_grad_prior,
+            dot_grad_noise=dot_grad_noise,
+            dot_prior_noise=dot_prior_noise,
+        )
 
     def step(
         self,
@@ -237,23 +308,14 @@ class LocalizedSGLDSampler:
         batch_mean_loss = per_ex_loss.mean()
         batch_mean_loss.backward()
 
-        grad_norm_sq = 0.0
-        for _, p in self.params:
-            if p.grad is not None:
-                grad_norm_sq += p.grad.detach().float().norm().item() ** 2
-
         if self.cfg.grad_clip is not None:
             torch.nn.utils.clip_grad_norm_(
                 [p for _, p in self.params], self.cfg.grad_clip
             )
 
-        noise_norm_sq = self._sgld_update(step_generator)
-
-        return {
-            "loss": float(batch_mean_loss.detach().item()),
-            "grad_norm": grad_norm_sq ** 0.5,
-            "noise_norm": noise_norm_sq ** 0.5,
-        }
+        diagnostics = self._sgld_update(step_generator)
+        diagnostics.loss = float(batch_mean_loss.detach().item())
+        return diagnostics.as_dict()
 
     def step_accumulated(
         self,
@@ -275,13 +337,10 @@ class LocalizedSGLDSampler:
                 [p for _, p in self.params], self.cfg.grad_clip
             )
 
-        noise_norm_sq = self._sgld_update(step_generator)
-
-        return {
-            "loss": total_loss,
-            "grad_norm": grad_norm,
-            "noise_norm": noise_norm_sq ** 0.5,
-        }
+        diagnostics = self._sgld_update(step_generator)
+        diagnostics.loss = total_loss
+        diagnostics.grad_norm = grad_norm
+        return diagnostics.as_dict()
 
     def step_accumulated_dataloader(
         self,
@@ -301,13 +360,10 @@ class LocalizedSGLDSampler:
                 [p for _, p in self.params], self.cfg.grad_clip
             )
 
-        noise_norm_sq = self._sgld_update(step_generator)
-
-        return {
-            "loss": total_loss,
-            "grad_norm": grad_norm,
-            "noise_norm": noise_norm_sq ** 0.5,
-        }
+        diagnostics = self._sgld_update(step_generator)
+        diagnostics.loss = total_loss
+        diagnostics.grad_norm = grad_norm
+        return diagnostics.as_dict()
 
 
 class RMSpropSGLDSampler:
@@ -360,7 +416,7 @@ class RMSpropSGLDSampler:
     def _rmsprop_update(
         self,
         step_generator: torch.Generator | None = None,
-    ) -> tuple[float, float]:
+    ) -> SamplerDiagnostics:
         lr = self.cfg.lr
         gamma = self.cfg.gamma
         nbeta = self._compute_nbeta()
@@ -368,6 +424,14 @@ class RMSpropSGLDSampler:
 
         grad_norm_sq = 0.0
         noise_norm_sq = 0.0
+        scaled_grad_sq = 0.0
+        unscaled_grad_sq = 0.0
+        localization_sq = 0.0
+        weight_decay_sq = 0.0
+        distance_sq = 0.0
+        dot_grad_prior = 0.0
+        dot_grad_noise = 0.0
+        dot_prior_noise = 0.0
         with torch.no_grad():
             for name, p in self.params:
                 if p.grad is None:
@@ -383,12 +447,19 @@ class RMSpropSGLDSampler:
                 preconditioner = 1.0 / (torch.sqrt(self.square_avg[name]) + self.eps)
 
                 loss_step = preconditioner * (raw_grad * nbeta)
+                scaled_grad = 0.5 * lr * loss_step
+                unscaled_grad = 0.5 * lr * (raw_grad * nbeta)
 
                 p_fp32 = self.shadow[name]
-                prior_grad = gamma * (p_fp32 - self.anchor_params[name])
+                distance_vec = p_fp32 - self.anchor_params[name]
+                prior_grad = gamma * distance_vec
+                localization = 0.5 * lr * (preconditioner * (gamma * distance_vec))
+                weight_decay = torch.zeros_like(localization)
                 if self.cfg.weight_decay != 0.0:
                     prior_grad = prior_grad + self.cfg.weight_decay * p_fp32
+                    weight_decay = 0.5 * lr * (preconditioner * (self.cfg.weight_decay * p_fp32))
                 prior_step = preconditioner * prior_grad
+                prior = localization + weight_decay
 
                 deterministic_update = -0.5 * lr * (loss_step + prior_step)
 
@@ -401,8 +472,29 @@ class RMSpropSGLDSampler:
                 p_fp32.add_(deterministic_update + noise_term)
                 p.copy_(p_fp32)
                 noise_norm_sq += noise_term.norm().item() ** 2
+                scaled_grad_sq += scaled_grad.norm().item() ** 2
+                unscaled_grad_sq += unscaled_grad.norm().item() ** 2
+                localization_sq += localization.norm().item() ** 2
+                weight_decay_sq += weight_decay.norm().item() ** 2
+                distance_sq += distance_vec.norm().item() ** 2
+                dot_grad_prior += float((scaled_grad * prior).sum().item())
+                dot_grad_noise += float((scaled_grad * noise_term).sum().item())
+                dot_prior_noise += float((prior * noise_term).sum().item())
 
-        return grad_norm_sq ** 0.5, noise_norm_sq ** 0.5
+        return SamplerDiagnostics(
+            loss=0.0,
+            grad_norm=grad_norm_sq ** 0.5,
+            noise_norm=noise_norm_sq ** 0.5,
+            scaled_grad_norm=scaled_grad_sq ** 0.5,
+            unscaled_grad_norm=unscaled_grad_sq ** 0.5,
+            localization_norm=localization_sq ** 0.5,
+            weight_decay_norm=weight_decay_sq ** 0.5,
+            prior_norm=(localization_sq + weight_decay_sq) ** 0.5,
+            distance=distance_sq ** 0.5,
+            dot_grad_prior=dot_grad_prior,
+            dot_grad_noise=dot_grad_noise,
+            dot_prior_noise=dot_prior_noise,
+        )
 
     def step(
         self,
@@ -427,13 +519,9 @@ class RMSpropSGLDSampler:
                 [p for _, p in self.params], self.cfg.grad_clip
             )
 
-        grad_norm, noise_norm = self._rmsprop_update(step_generator)
-
-        return {
-            "loss": float(batch_mean_loss.detach().item()),
-            "grad_norm": grad_norm,
-            "noise_norm": noise_norm,
-        }
+        diagnostics = self._rmsprop_update(step_generator)
+        diagnostics.loss = float(batch_mean_loss.detach().item())
+        return diagnostics.as_dict()
 
     def step_accumulated(
         self,
@@ -455,13 +543,9 @@ class RMSpropSGLDSampler:
                 [p for _, p in self.params], self.cfg.grad_clip
             )
 
-        grad_norm, noise_norm = self._rmsprop_update(step_generator)
-
-        return {
-            "loss": total_loss,
-            "grad_norm": grad_norm,
-            "noise_norm": noise_norm,
-        }
+        diagnostics = self._rmsprop_update(step_generator)
+        diagnostics.loss = total_loss
+        return diagnostics.as_dict()
 
     def step_accumulated_dataloader(
         self,
@@ -481,13 +565,9 @@ class RMSpropSGLDSampler:
                 [p for _, p in self.params], self.cfg.grad_clip
             )
 
-        grad_norm, noise_norm = self._rmsprop_update(step_generator)
-
-        return {
-            "loss": total_loss,
-            "grad_norm": grad_norm,
-            "noise_norm": noise_norm,
-        }
+        diagnostics = self._rmsprop_update(step_generator)
+        diagnostics.loss = total_loss
+        return diagnostics.as_dict()
 
 
 def create_sampler(

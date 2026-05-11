@@ -214,7 +214,12 @@ def main() -> None:
     p_run.add_argument("--max_length", type=int, default=256)
     p_run.add_argument("--train_batch_size", type=int, default=16)
     p_run.add_argument("--eval_batch_size", type=int, default=32)
-    p_run.add_argument("--pool_eval_subset", type=int, default=0)
+    p_run.add_argument(
+        "--pool_eval_subset",
+        type=int,
+        default=0,
+        help="Explicit observable sample cap for the pool dataset. Overrides --batches_per_draw.",
+    )
     p_run.add_argument("--lr", type=float, default=5e-6)
     p_run.add_argument("--gamma", type=float, default=1e-3)
     p_run.add_argument("--beta", type=float, default=1.0)
@@ -234,7 +239,12 @@ def main() -> None:
     )
     p_run.add_argument("--rmsprop_alpha", type=float, default=0.99)
     p_run.add_argument("--rmsprop_eps", type=float, default=1e-1)
-    p_run.add_argument("--batches_per_draw", type=int, default=0)
+    p_run.add_argument(
+        "--batches_per_draw",
+        type=int,
+        default=0,
+        help="Number of fixed observable eval mini-batches per draw. 0 means evaluate the full observable dataset.",
+    )
     p_run.add_argument("--gradient_accumulation_steps", type=int, default=1)
     p_run.add_argument(
         "--chain_id",
@@ -283,6 +293,11 @@ def main() -> None:
     p_analyze.add_argument("--out_dir", default=None)
     p_analyze.add_argument("--score_col", default=None)
     p_analyze.add_argument("--top_k", type=int, default=None)
+    p_analyze.add_argument(
+        "--enable_aux_query_plots",
+        action="store_true",
+        help="Enable auxiliary query-sensitivity plots based on pool×query cross-correlation.",
+    )
     p_analyze.add_argument(
         "--negate_scores",
         action="store_true",
@@ -713,7 +728,7 @@ def main() -> None:
         acfg = AnalyzeConfig()
         for field_name in (
             "score_col", "top_k", "negate_scores",
-            "save_full_query_matrix", "hist_bins",
+            "save_full_query_matrix", "enable_aux_query_plots", "hist_bins",
             "scatter_max_points", "heatmap_max_pool",
             "heatmap_max_query", "rhat_max_samples",
             "eigenvalue_max_pool", "eigenvalue_max_ev",

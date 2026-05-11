@@ -14,6 +14,7 @@ swanlog/
 test_data/
 
 .claude/
+.omx/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/

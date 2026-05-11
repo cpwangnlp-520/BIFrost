@@ -76,6 +76,45 @@ def _barrier() -> None:
         dist.barrier()
 
 
+def _sampling_effective_batch_size(
+    train_batch_size: int,
+    gradient_accumulation_steps: int,
+) -> int:
+    return max(1, train_batch_size * max(1, gradient_accumulation_steps))
+
+
+def _observable_sample_budget(
+    eval_batch_size: int,
+    batches_per_draw: int,
+) -> int:
+    if batches_per_draw <= 0:
+        return 0
+    return max(1, eval_batch_size * batches_per_draw)
+
+
+def _resolve_observable_max_samples(
+    eval_batch_size: int,
+    batches_per_draw: int,
+    explicit_limit: int = 0,
+) -> int:
+    if explicit_limit > 0:
+        return explicit_limit
+    return _observable_sample_budget(eval_batch_size, batches_per_draw)
+
+
+def _compute_nbeta_value(
+    sgld_cfg: SGLDConfig,
+    source_dataset_size: int,
+    sampling_effective_batch_size: int,
+) -> float:
+    if sgld_cfg.nbeta >= 0:
+        return sgld_cfg.nbeta
+    if sgld_cfg.nbeta_mode == "devinterp":
+        bs = max(sampling_effective_batch_size, 2)
+        return bs / math.log(bs)
+    return sgld_cfg.beta * float(source_dataset_size)
+
+
 def _broadcast_plan(
     plan: list[tuple[str, str]], rank: int, world_size: int
 ) -> list[tuple[str, str]]:
@@ -458,9 +497,14 @@ def _log_training_summary_charts(out_dir: str, chain_ids: list[int]) -> None:
         ("pool_loss_mean", "4_1_bif_summary/pool_loss"),
         ("query_loss_mean", "4_1_bif_summary/query_loss"),
         ("grad_norm_mean", "4_1_bif_summary/grad_norm"),
+        ("scaled_grad_norm_mean", "4_1_bif_summary/scaled_grad"),
         ("noise_norm_mean", "4_1_bif_summary/noise_norm"),
+        ("localization_norm_mean", "4_1_bif_summary/localization_norm"),
+        ("weight_decay_norm_mean", "4_1_bif_summary/weight_decay_norm"),
+        ("prior_norm_mean", "4_1_bif_summary/prior_norm"),
         ("snr_mean", "4_1_bif_summary/snr"),
         ("step_loss_mean", "4_1_bif_summary/step_loss"),
+        ("step_distance_mean", "4_1_bif_summary/step_distance"),
         ("param_dist", "4_1_bif_summary/param_dist"),
     ]
 
@@ -475,6 +519,8 @@ def _log_training_summary_charts(out_dir: str, chain_ids: list[int]) -> None:
         n = len(data["pool_loss_mean"])
         max_draws = max(max_draws, n)
         for arr_key, _ in metrics_keys:
+            if arr_key not in data:
+                continue
             per_metric[_][f"chain{cid}"] = data[arr_key].tolist()
 
     if max_draws == 0:
@@ -562,29 +608,6 @@ def run_bif(
     device = torch.device(device)
     ensure_dir(out_dir)
 
-    if rank == 0:
-        _effective_bs = train_batch_size * max(sgld_cfg.batches_per_draw, 1) * sgld_cfg.gradient_accumulation_steps
-        if sgld_cfg.nbeta >= 0:
-            _nbeta_val = sgld_cfg.nbeta
-        elif sgld_cfg.nbeta_mode == "devinterp":
-            _nbeta_val = _effective_bs / math.log(max(_effective_bs, 2))
-        else:
-            _nbeta_val = sgld_cfg.beta * len(pool_ds)
-        save_json(
-            f"{out_dir}/run_config.json",
-            {
-                "model_name_or_path": model_name_or_path,
-                "max_length": max_length,
-                "pool_jsonl": pool_jsonl,
-                "query_jsonl": query_jsonl,
-                "nbeta_mode": sgld_cfg.nbeta_mode,
-                "nbeta": sgld_cfg.nbeta,
-                "nbeta_computed": _nbeta_val,
-                "effective_batch_size": _effective_bs,
-                "sgld_config": asdict(sgld_cfg),
-            },
-        )
-
     logger.info("Loading tokenizer and model (rank=%d)", rank)
     tok_src = tokenizer_path or model_name_or_path
     tokenizer = AutoTokenizer.from_pretrained(tok_src)
@@ -622,23 +645,60 @@ def run_bif(
         task_type_key=query_task_type_key,
     )
 
+    sampling_effective_batch_size = _sampling_effective_batch_size(
+        train_batch_size,
+        sgld_cfg.gradient_accumulation_steps,
+    )
+    observable_budget = _observable_sample_budget(
+        eval_batch_size,
+        sgld_cfg.batches_per_draw,
+    )
+    computed_nbeta = _compute_nbeta_value(
+        sgld_cfg,
+        source_dataset_size=len(pool_ds),
+        sampling_effective_batch_size=sampling_effective_batch_size,
+    )
+
+    if rank == 0:
+        save_json(
+            f"{out_dir}/run_config.json",
+            {
+                "model_name_or_path": model_name_or_path,
+                "max_length": max_length,
+                "pool_jsonl": pool_jsonl,
+                "query_jsonl": query_jsonl,
+                "nbeta_mode": sgld_cfg.nbeta_mode,
+                "nbeta": sgld_cfg.nbeta,
+                "nbeta_computed": computed_nbeta,
+                "sampling_effective_batch_size": sampling_effective_batch_size,
+                "observable_sample_budget": observable_budget,
+                "sgld_config": asdict(sgld_cfg),
+            },
+        )
+
     anchor_params = {
         name: p.detach().clone().to(device)
         for name, p in model.named_parameters()
         if p.requires_grad
     }
-    effective_batch_size = train_batch_size * max(sgld_cfg.batches_per_draw, 1) * sgld_cfg.gradient_accumulation_steps
     sampler = create_sampler(
         model,
         anchor_params,
         sgld_cfg,
         source_dataset_size=len(pool_ds),
-        effective_batch_size=effective_batch_size,
+        effective_batch_size=sampling_effective_batch_size,
     )
 
     obs_seed = sgld_cfg.seed + 1337
-    pool_max = pool_eval_subset if pool_eval_subset > 0 else 0
-    query_max = 0
+    pool_max = _resolve_observable_max_samples(
+        eval_batch_size,
+        sgld_cfg.batches_per_draw,
+        explicit_limit=pool_eval_subset,
+    )
+    query_max = _resolve_observable_max_samples(
+        eval_batch_size,
+        sgld_cfg.batches_per_draw,
+    )
     pool_obs = Observable(
         name="pool",
         dataset=pool_ds,
@@ -716,16 +776,26 @@ def run_bif(
         steps_since_draw = sgld_cfg.num_steps_bw_draws
 
         draw_grad_norms: list[float] = []
+        draw_scaled_grad_norms: list[float] = []
         draw_noise_norms: list[float] = []
+        draw_localization_norms: list[float] = []
+        draw_weight_decay_norms: list[float] = []
+        draw_prior_norms: list[float] = []
+        draw_step_distances: list[float] = []
         draw_step_losses: list[float] = []
         draw_snrs: list[float] = []
 
         all_draw_pool_means: list[float] = []
         all_draw_query_means: list[float] = []
         all_draw_grad_norm: list[float] = []
+        all_draw_scaled_grad_norm: list[float] = []
         all_draw_noise_norm: list[float] = []
+        all_draw_localization_norm: list[float] = []
+        all_draw_weight_decay_norm: list[float] = []
+        all_draw_prior_norm: list[float] = []
         all_draw_snr: list[float] = []
         all_draw_step_loss: list[float] = []
+        all_draw_step_distance: list[float] = []
         all_draw_param_dist: list[float] = []
         all_draw_is_burnin: list[int] = []
 
@@ -733,20 +803,67 @@ def run_bif(
             if not draw_grad_norms:
                 return {}
             gn = np.array(draw_grad_norms)
+            sgn = np.array(draw_scaled_grad_norms)
             nn = np.array(draw_noise_norms)
+            ln = np.array(draw_localization_norms)
+            wd = np.array(draw_weight_decay_norms)
+            pn = np.array(draw_prior_norms)
+            dn = np.array(draw_step_distances)
             sl = np.array(draw_step_losses)
             sr = np.array(draw_snrs)
             return {
                 f"4_1_bif_sgld/chain{chain_id}/draw/grad_norm_mean": float(gn.mean()),
                 f"4_1_bif_sgld/chain{chain_id}/draw/grad_norm_max": float(gn.max()),
+                f"4_1_bif_sgld/chain{chain_id}/draw/scaled_grad_norm_mean": float(sgn.mean()),
                 f"4_1_bif_sgld/chain{chain_id}/draw/noise_norm_mean": float(nn.mean()),
                 f"4_1_bif_sgld/chain{chain_id}/draw/noise_norm_max": float(nn.max()),
+                f"4_1_bif_sgld/chain{chain_id}/draw/localization_norm_mean": float(ln.mean()),
+                f"4_1_bif_sgld/chain{chain_id}/draw/weight_decay_norm_mean": float(wd.mean()),
+                f"4_1_bif_sgld/chain{chain_id}/draw/prior_norm_mean": float(pn.mean()),
+                f"4_1_bif_sgld/chain{chain_id}/draw/distance_mean": float(dn.mean()),
                 f"4_1_bif_sgld/chain{chain_id}/draw/step_loss_mean": float(sl.mean()),
                 f"4_1_bif_sgld/chain{chain_id}/draw/snr_mean": float(sr.mean()),
                 f"4_1_bif_sgld/chain{chain_id}/draw/snr_min": float(sr.min()),
                 f"4_1_bif_sgld/chain{chain_id}/draw/num_steps": len(draw_grad_norms),
                 f"4_1_bif_sgld/chain{chain_id}/draw/actual_sgld_step": step,
             }
+
+        def _append_draw_aggregates(param_dist: float, is_burnin_draw: int) -> None:
+            all_draw_pool_means.append(float(pool_seq.mean()))
+            all_draw_query_means.append(float(query_seq.mean()))
+            if draw_grad_norms:
+                all_draw_grad_norm.append(float(np.mean(draw_grad_norms)))
+                all_draw_scaled_grad_norm.append(float(np.mean(draw_scaled_grad_norms)))
+                all_draw_noise_norm.append(float(np.mean(draw_noise_norms)))
+                all_draw_localization_norm.append(float(np.mean(draw_localization_norms)))
+                all_draw_weight_decay_norm.append(float(np.mean(draw_weight_decay_norms)))
+                all_draw_prior_norm.append(float(np.mean(draw_prior_norms)))
+                all_draw_step_loss.append(float(np.mean(draw_step_losses)))
+                all_draw_step_distance.append(float(np.mean(draw_step_distances)))
+                all_draw_snr.append(float(np.mean(draw_snrs)))
+            else:
+                all_draw_grad_norm.append(0.0)
+                all_draw_scaled_grad_norm.append(0.0)
+                all_draw_noise_norm.append(0.0)
+                all_draw_localization_norm.append(0.0)
+                all_draw_weight_decay_norm.append(0.0)
+                all_draw_prior_norm.append(0.0)
+                all_draw_step_loss.append(0.0)
+                all_draw_step_distance.append(0.0)
+                all_draw_snr.append(0.0)
+            all_draw_param_dist.append(param_dist)
+            all_draw_is_burnin.append(is_burnin_draw)
+
+        def _clear_draw_buffers() -> None:
+            draw_grad_norms.clear()
+            draw_scaled_grad_norms.clear()
+            draw_noise_norms.clear()
+            draw_localization_norms.clear()
+            draw_weight_decay_norms.clear()
+            draw_prior_norms.clear()
+            draw_step_distances.clear()
+            draw_step_losses.clear()
+            draw_snrs.clear()
 
         pbar = tqdm(range(total_steps), desc=f"Chain {chain_id}", disable=(rank != 0))
         for step in pbar:
@@ -763,10 +880,15 @@ def run_bif(
             steps_since_draw += 1
 
             draw_grad_norms.append(float(step_info["grad_norm"]))
+            draw_scaled_grad_norms.append(float(step_info["scaled_grad_norm"]))
             draw_noise_norms.append(float(step_info["noise_norm"]))
+            draw_localization_norms.append(float(step_info["localization_norm"]))
+            draw_weight_decay_norms.append(float(step_info["weight_decay_norm"]))
+            draw_prior_norms.append(float(step_info["prior_norm"]))
+            draw_step_distances.append(float(step_info["distance"]))
             draw_step_losses.append(float(step_info["loss"]))
             draw_snrs.append(
-                float(step_info["grad_norm"])
+                float(step_info["scaled_grad_norm"])
                 / (float(step_info["noise_norm"]) + 1e-12)
             )
 
@@ -805,25 +927,11 @@ def run_bif(
                 burnin_query_means.append(float(query_seq.mean()))
                 burnin_draw_count += 1
 
-                all_draw_pool_means.append(float(pool_seq.mean()))
-                all_draw_query_means.append(float(query_seq.mean()))
-                if draw_grad_norms:
-                    all_draw_grad_norm.append(float(np.mean(draw_grad_norms)))
-                    all_draw_noise_norm.append(float(np.mean(draw_noise_norms)))
-                    all_draw_step_loss.append(float(np.mean(draw_step_losses)))
-                    all_draw_snr.append(float(np.mean(draw_snrs)))
-                else:
-                    all_draw_grad_norm.append(0.0)
-                    all_draw_noise_norm.append(0.0)
-                    all_draw_step_loss.append(0.0)
-                    all_draw_snr.append(0.0)
-                all_draw_param_dist.append(0.0)
-                all_draw_is_burnin.append(1)
-
-                draw_grad_norms.clear()
-                draw_noise_norms.clear()
-                draw_step_losses.clear()
-                draw_snrs.clear()
+                _append_draw_aggregates(
+                    param_dist=float(step_info["distance"]),
+                    is_burnin_draw=1,
+                )
+                _clear_draw_buffers()
 
             if is_draw_step:
                 steps_since_draw = 0
@@ -875,33 +983,25 @@ def run_bif(
                         )
                         param_dist = param_dist_sq ** 0.5
 
-                all_draw_pool_means.append(float(pool_seq.mean()))
-                all_draw_query_means.append(float(query_seq.mean()))
-                if draw_grad_norms:
-                    all_draw_grad_norm.append(float(np.mean(draw_grad_norms)))
-                    all_draw_noise_norm.append(float(np.mean(draw_noise_norms)))
-                    all_draw_step_loss.append(float(np.mean(draw_step_losses)))
-                    all_draw_snr.append(float(np.mean(draw_snrs)))
-                else:
-                    all_draw_grad_norm.append(0.0)
-                    all_draw_noise_norm.append(0.0)
-                    all_draw_step_loss.append(0.0)
-                    all_draw_snr.append(0.0)
-                all_draw_param_dist.append(param_dist)
-                all_draw_is_burnin.append(0)
-
-                draw_grad_norms.clear()
-                draw_noise_norms.clear()
-                draw_step_losses.clear()
-                draw_snrs.clear()
+                _append_draw_aggregates(param_dist=param_dist, is_burnin_draw=0)
+                _clear_draw_buffers()
 
             if rank == 0:
                 swan_log(
                     {
                         f"4_1_bif_sgld_step/chain{chain_id}/loss": step_info["loss"],
                         f"4_1_bif_sgld_step/chain{chain_id}/grad_norm": step_info["grad_norm"],
+                        f"4_1_bif_sgld_step/chain{chain_id}/scaled_grad_norm": step_info["scaled_grad_norm"],
+                        f"4_1_bif_sgld_step/chain{chain_id}/unscaled_grad_norm": step_info["unscaled_grad_norm"],
                         f"4_1_bif_sgld_step/chain{chain_id}/noise_norm": step_info["noise_norm"],
-                        f"4_1_bif_sgld_step/chain{chain_id}/signal_noise_ratio": step_info["grad_norm"] / (step_info["noise_norm"] + 1e-12),
+                        f"4_1_bif_sgld_step/chain{chain_id}/localization_norm": step_info["localization_norm"],
+                        f"4_1_bif_sgld_step/chain{chain_id}/weight_decay_norm": step_info["weight_decay_norm"],
+                        f"4_1_bif_sgld_step/chain{chain_id}/prior_norm": step_info["prior_norm"],
+                        f"4_1_bif_sgld_step/chain{chain_id}/distance": step_info["distance"],
+                        f"4_1_bif_sgld_step/chain{chain_id}/dot_grad_prior": step_info["dot_grad_prior"],
+                        f"4_1_bif_sgld_step/chain{chain_id}/dot_grad_noise": step_info["dot_grad_noise"],
+                        f"4_1_bif_sgld_step/chain{chain_id}/dot_prior_noise": step_info["dot_prior_noise"],
+                        f"4_1_bif_sgld_step/chain{chain_id}/signal_noise_ratio": step_info["scaled_grad_norm"] / (step_info["noise_norm"] + 1e-12),
                     },
                     step=step,
                 )
@@ -921,8 +1021,13 @@ def run_bif(
                 pool_loss_mean=np.array(all_draw_pool_means),
                 query_loss_mean=np.array(all_draw_query_means),
                 grad_norm_mean=np.array(all_draw_grad_norm),
+                scaled_grad_norm_mean=np.array(all_draw_scaled_grad_norm),
                 noise_norm_mean=np.array(all_draw_noise_norm),
+                localization_norm_mean=np.array(all_draw_localization_norm),
+                weight_decay_norm_mean=np.array(all_draw_weight_decay_norm),
+                prior_norm_mean=np.array(all_draw_prior_norm),
                 step_loss_mean=np.array(all_draw_step_loss),
+                step_distance_mean=np.array(all_draw_step_distance),
                 snr_mean=np.array(all_draw_snr),
                 param_dist=np.array(all_draw_param_dist),
                 is_burnin=np.array(all_draw_is_burnin),
